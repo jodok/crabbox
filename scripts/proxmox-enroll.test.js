@@ -13,7 +13,7 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 key = 'tskey-auth-not-a-real-enrollment-key'
 request = {'authKey': key, 'hostname': 'cbx-example', 'tags': ['tag:worker']}
-for problem in ('', 'not-root', 'dirty-template', 'join-failure', 'not-running', 'lan-ip', 'symlink'):
+for problem in ('', 'not-root', 'dirty-template', 'join-failure', 'not-running', 'lan-ip', 'symlink', 'missing-id', 'empty-id'):
     with tempfile.TemporaryDirectory() as directory:
         m.METADATA = pathlib.Path(directory) / 'metadata'
         if problem == 'symlink':
@@ -41,6 +41,10 @@ for problem in ('', 'not-root', 'dirty-template', 'join-failure', 'not-running',
                 state['BackendState'] = 'NeedsLogin'
             if not before and problem == 'lan-ip':
                 state['Self']['TailscaleIPs'] = ['10.77.1.32']
+            if not before and problem == 'missing-id':
+                del state['Self']['ID']
+            if not before and problem == 'empty-id':
+                state['Self']['ID'] = ''
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(state).encode())
         # Test fixtures run without root. Production requires root ownership;
         # substitute only the fixture's stat owner, retaining real file I/O.

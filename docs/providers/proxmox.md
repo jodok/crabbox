@@ -733,7 +733,10 @@ not writable by the lease user, at `/usr/local/libexec/crabbox-enroll`. The help
 rejects pre-enrolled state and sends its key to `tailscale up` through stdin,
 with Tailscale SSH and advertised route acceptance disabled. Normal Tailnet DNS
 acceptance stays enabled so private controller/MagicDNS HTTPS names can resolve.
-It saves only non-secret individual fields for the common SSH metadata reader.
+Successful enrollment requires a nonempty Tailscale `Self.ID`. The helper saves
+only non-secret individual fields for the common SSH metadata reader; its framing
+accepts both newline-terminated and unterminated files, including absent optional
+fields.
 No enrolled tailscaled state, device identity, reusable credential, machine ID
 or SSH host keys may be baked into a reusable template. The existing template
 builder does **not** install this Tailnet extension automatically.
@@ -813,6 +816,20 @@ After successful helper exit, live QGA discovery selects only an IPv4 on exact
 SSH bootstrap must succeed using the lease key. Provision, fixed replay,
 resolve/inspect and run share that address policy and normal `TailscaleMetadata`;
 missing QGA/address never reuses a stale saved address or chooses an underlay IP.
+The provider pins that QGA-selected IP through common bootstrap/run/status route
+selection: persisted `tailscale_fqdn` and hostname values cannot replace it.
+
+Before acquisition returns, the CLI reads the prepared guest's enrollment receipt
+over the per-lease SSH connection, requires its IPv4 to match live QGA discovery,
+and durably binds its actual device ID to the canonical lease, cluster scope,
+VMID and vmgenid in the fixed claim. Fresh-process `inspect --json` exposes that
+receipt as `tailscale.deviceID`; it does not trust a device ID copied into mutable
+Proxmox descriptions. Fixed replay revalidates the receipt against the bound
+device without another clone or key issuance. A missing receipt, changed device
+or generation fails closed; a claim without a bound device cannot adopt a mutable
+label as proof. Metadata refresh implements the common persistence capability
+and may confirm, but not replace, this identity.
+
 A public-network override cannot downgrade an already Tailnet-bound lease.
 Release does not require guest reachability. Failed/cancelled provisioning retains
 its fixed claim; stop the same canonical lease, not another allocation. VM

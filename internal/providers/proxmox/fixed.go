@@ -67,6 +67,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		return core.LeaseTarget{}, err
 	}
 	var publicKey, fingerprint string
+	newlyCreated := false
 	acquired, err := core.AcquireFixedResource(ctx, core.FixedAcquireOptions{
 		Kind: fixedProxmoxLeaseKind, LeaseID: leaseID, CheckpointID: req.RequestedCheckpointID,
 		RepoRoot: req.Repo.Root, Reclaim: req.Reclaim, TargetOS: cfg.TargetOS,
@@ -169,6 +170,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 			}
 			return core.Server{}, fmt.Errorf("Proxmox clone outcome or identity is uncertain; claim retained for lease %s (VMID %d). Restore permissions and inspect the VM and clone task before recovery with crabbox stop --force --provider proxmox --id %s: %w", leaseID, vmid, leaseID, err)
 		}
+		newlyCreated = true
 		return server, nil
 	}, PrepareAccess: func(ctx context.Context, tx *core.FixedTransaction, server core.Server) (core.LeaseTarget, error) {
 		claim := tx.Claim
@@ -185,11 +187,30 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		if err := core.ValidateProxmoxTailnetAccess(cfg, server); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+		target := proxmoxNetworkTarget(cfg, server)
 		if err := waitForSSHReadyFunc(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		server.Labels = maps.Clone(server.Labels)
+		if server.Labels["tailscale"] == "true" {
+			if !newlyCreated && claim.Labels["tailscale_device_id"] == "" {
+				return core.LeaseTarget{}, core.Exit(4, "lease_id_conflict: Proxmox Tailnet replay has no bound device identity")
+			}
+			meta, err := readTailnetMetadata(ctx, target)
+			if err != nil {
+				return core.LeaseTarget{}, fmt.Errorf("read Proxmox enrollment identity: %w", err)
+			}
+			if err := validateTailnetMetadata(server, meta, claim.Labels["tailscale_device_id"]); err != nil {
+				return core.LeaseTarget{}, err
+			}
+			server.Labels["tailscale_device_id"] = meta.DeviceID
+			delete(server.Labels, "tailscale_fqdn")
+			// The receipt is committed under the fixed transaction's claim fence,
+			// tied to its canonical lease, cluster, VMID and vmgenid before return.
+			if err := tx.Bind(core.FixedResourceBinding{ImmutableID: server.ImmutableID, Labels: server.Labels}); err != nil {
+				return core.LeaseTarget{}, err
+			}
+		}
 		server.Labels["state"] = "ready"
 		if server.Labels["tailscale"] == "true" {
 			server.Labels["tailscale_state"] = "ready"

@@ -1443,7 +1443,10 @@ func (c *ProxmoxClient) getServer(ctx context.Context, id string, requireConfig 
 	}
 	ip, _ := c.guestIPv4ForNetwork(ctx, vmid, labels["tailscale"] == "true")
 	if labels["tailscale"] == "true" {
-		// Never route through a stale persisted address when QGA is unavailable.
+		// Never route through a persisted hostname/FQDN or address. QGA owns routing.
+		delete(labels, "tailscale_fqdn")
+		// Device identity is restored only from the generation-bound local claim.
+		delete(labels, "tailscale_device_id")
 		labels["tailscale_ipv4"] = ip
 		labels["tailscale_state"] = "pending"
 		if ip != "" && labels["state"] == "ready" {

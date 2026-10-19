@@ -226,6 +226,14 @@ func RenderTailscaleHostname(template, leaseID, slug, provider string) string {
 }
 
 func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target SSHTarget) (resolvedNetworkTarget, error) {
+	if target.AuthoritativeNetwork {
+		if cfg.Network == NetworkPublic || target.NetworkKind != NetworkTailscale || target.Host == "" {
+			return resolvedNetworkTarget{}, Exit(5, "provider-owned Tailnet route cannot fall back to public networking")
+		}
+		// Route selection is already complete. Readiness is checked by the
+		// operation's ordinary SSH gate; it cannot select another address.
+		return resolvedNetworkTarget{Target: target, Network: NetworkTailscale}, nil
+	}
 	meta := serverTailscaleMetadata(server)
 	switch cfg.Network {
 	case NetworkPublic:
@@ -262,7 +270,7 @@ func resolveNetworkTarget(ctx context.Context, cfg Config, server Server, target
 }
 
 func bootstrapNetworkTarget(cfg Config, server Server, target SSHTarget) SSHTarget {
-	if !preferTailscaleBootstrap(cfg, server) {
+	if target.AuthoritativeNetwork || !preferTailscaleBootstrap(cfg, server) {
 		return target
 	}
 	host := tailscaleTargetHost(serverTailscaleMetadata(server))
@@ -402,24 +410,30 @@ func coordinatorTailscaleResponseServer(cfg Config, previous Server, lease Coord
 	return updated, nil
 }
 
+// ReadRemoteTailscaleMetadata reads the prepared guest's non-secret enrollment receipt.
+func ReadRemoteTailscaleMetadata(ctx context.Context, target SSHTarget) (TailscaleMetadata, error) {
+	return readRemoteTailscaleMetadata(ctx, target)
+}
+
+const remoteTailscaleMetadataScript = `for field in ipv4 hostname fqdn exit-node exit-node-allow-lan-access version device-id; do
+  value=""
+  if [ -f "/var/lib/crabbox/tailscale-$field" ]; then value=$(cat "/var/lib/crabbox/tailscale-$field") || exit 1; fi
+  printf '%s\000' "$value"
+done`
+
 func readRemoteTailscaleMetadata(ctx context.Context, target SSHTarget) (TailscaleMetadata, error) {
-	out, err := runSSHOutput(ctx, target, `if [ -f /var/lib/crabbox/tailscale-ipv4 ]; then cat /var/lib/crabbox/tailscale-ipv4; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-hostname ]; then cat /var/lib/crabbox/tailscale-hostname; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-fqdn ]; then cat /var/lib/crabbox/tailscale-fqdn; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-exit-node ]; then cat /var/lib/crabbox/tailscale-exit-node; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-exit-node-allow-lan-access ]; then cat /var/lib/crabbox/tailscale-exit-node-allow-lan-access; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-version ]; then cat /var/lib/crabbox/tailscale-version; fi
-printf '\n'
-if [ -f /var/lib/crabbox/tailscale-device-id ]; then cat /var/lib/crabbox/tailscale-device-id; fi`)
+	return readRemoteTailscaleMetadataWith(ctx, target, runSSHOutput)
+}
+
+func readRemoteTailscaleMetadataWith(ctx context.Context, target SSHTarget, run func(context.Context, SSHTarget, string) (string, error)) (TailscaleMetadata, error) {
+	out, err := run(ctx, target, remoteTailscaleMetadataScript)
 	if err != nil {
 		return TailscaleMetadata{}, err
 	}
-	lines := strings.Split(out, "\n")
+	lines := strings.Split(out, "\x00")
+	if len(lines) != 8 || lines[7] != "" {
+		return TailscaleMetadata{}, fmt.Errorf("invalid remote tailscale metadata framing")
+	}
 	meta := TailscaleMetadata{Enabled: true, State: "ready"}
 	if len(lines) > 0 {
 		meta.IPv4 = strings.TrimSpace(lines[0])

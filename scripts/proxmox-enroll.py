@@ -58,6 +58,9 @@ def enroll(stream):
     status = json.loads(result.stdout)
     if status.get("BackendState") != "Running":
         raise ValueError("not joined")
+    device_id = status.get("Self", {}).get("ID")
+    if not isinstance(device_id, str) or not device_id.strip() or any(char.isspace() for char in device_id) or "\x00" in device_id:
+        raise ValueError("no device identity")
     addresses = [ipaddress.ip_address(value) for value in status.get("Self", {}).get("TailscaleIPs", [])]
     if not any(ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10") for ip in addresses):
         raise ValueError("no Tailnet IPv4")
@@ -71,7 +74,7 @@ def enroll(stream):
     values = {
         "tailscale-ipv4": sorted(str(ip) for ip in addresses if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"))[0],
         "tailscale-hostname": hostname,
-        "tailscale-device-id": status.get("Self", {}).get("ID", ""),
+        "tailscale-device-id": device_id,
     }
     for name, value in values.items():
         # Do not follow an image-provided or lease-user-controlled symlink.

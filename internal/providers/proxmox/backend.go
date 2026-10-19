@@ -336,7 +336,7 @@ func (b *leaseBackend) resolveNumericClaim(cloudID string) (core.LeaseClaim, boo
 func (b *leaseBackend) targetForServer(server core.Server, releaseOnly bool) (core.LeaseTarget, error) {
 	cfg := b.Cfg
 	if !releaseOnly {
-		if err := b.validateTailnetBinding(server); err != nil {
+		if err := b.validateTailnetBinding(&server); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if err := core.ValidateProxmoxTailnetAccess(cfg, server); err != nil {
@@ -347,7 +347,7 @@ func (b *leaseBackend) targetForServer(server core.Server, releaseOnly bool) (co
 		cfg.SSHPort = "22"
 		cfg.SSHFallbackPorts = nil
 	}
-	target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
+	target := proxmoxNetworkTarget(cfg, server)
 	leaseID := core.Blank(server.Labels["lease"], server.CloudID)
 	if !releaseOnly {
 		if err := core.UseStoredTestboxKey(&target, leaseID); err != nil {
@@ -363,7 +363,16 @@ func (b *leaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.L
 	if err != nil {
 		return nil, err
 	}
-	return client.ListCrabboxServersCluster(ctx)
+	servers, err := client.ListCrabboxServersCluster(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range servers {
+		if err := b.validateTailnetBinding(&servers[i]); err != nil {
+			return nil, err
+		}
+	}
+	return servers, nil
 }
 
 func (b *leaseBackend) Doctor(ctx context.Context, _ core.DoctorRequest) (core.DoctorResult, error) {
@@ -766,7 +775,7 @@ func removeLocalLeaseResidue(leaseID string) {
 }
 
 // Route policy is owned by the fixed claim, not a mutable address/label alone.
-func (b *leaseBackend) validateTailnetBinding(server core.Server) error {
+func (b *leaseBackend) validateTailnetBinding(server *core.Server) error {
 	claims, err := core.ListLeaseClaims()
 	if err != nil {
 		return err
@@ -786,12 +795,19 @@ func (b *leaseBackend) validateTailnetBinding(server core.Server) error {
 		if claim.CloudImmutableID == "" {
 			return core.Exit(4, "lease_id_conflict: Proxmox Tailnet lease has no durable generation")
 		}
-		if err := validateFixedProxmoxServer(server, claim, vmid, node); err != nil {
+		if err := validateFixedProxmoxServer(*server, claim, vmid, node); err != nil {
 			return err
 		}
 		if err := validateFixedProxmoxLocalBinding(claim); err != nil {
 			return err
 		}
+		deviceID := claim.Labels["tailscale_device_id"]
+		if strings.TrimSpace(deviceID) == "" {
+			return core.Exit(4, "lease_id_conflict: Proxmox Tailnet lease has no bound device identity")
+		}
+		server.Labels = shared.CloneLabels(server.Labels)
+		server.Labels["tailscale_device_id"] = deviceID
+		delete(server.Labels, "tailscale_fqdn")
 		found = true
 	}
 	if server.Labels["tailscale"] == "true" && !found {

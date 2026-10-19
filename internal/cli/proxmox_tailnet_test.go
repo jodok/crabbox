@@ -124,6 +124,8 @@ func TestProxmoxTailnetNativeEnrollmentAndFailClosedRouting(t *testing.T) {
 	for _, problem := range []string{"", "boolean flags", "numeric running", "denied", "generation", "exec echo", "status echo", "helper failure", "no pid", "cancel", "no tailscale0"} {
 		t.Run(problem, func(t *testing.T) {
 			cfg, server := tailnetTestConfig(), tailnetTestServer()
+			server.Labels["tailscale_fqdn"] = "10.77.1.32"
+			server.Labels["tailscale_device_id"] = "forged-description-device"
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			var issued, execs, statuses int
@@ -238,7 +240,7 @@ func TestProxmoxTailnetNativeEnrollmentAndFailClosedRouting(t *testing.T) {
 						t.Fatal("missing interface admitted")
 					}
 				} else {
-					if live.PublicNet.IPv4.IP != "100.100.1.2" || live.Labels["tailscale_ipv4"] != "100.100.1.2" {
+					if live.PublicNet.IPv4.IP != "100.100.1.2" || live.Labels["tailscale_ipv4"] != "100.100.1.2" || live.Labels["tailscale_fqdn"] != "" || live.Labels["tailscale_device_id"] != "" {
 						t.Fatalf("wrong routing %+v", live)
 					}
 					if err := ValidateProxmoxTailnetAccess(cfg, live); err != nil {
