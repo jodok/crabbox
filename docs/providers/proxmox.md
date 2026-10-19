@@ -731,7 +731,8 @@ The template must already contain running QGA, cloud-init, OpenSSH, Python 3,
 [scripts/proxmox-enroll.py](../../scripts/proxmox-enroll.py) installed root-owned,
 not writable by the lease user, at `/usr/local/libexec/crabbox-enroll`. The helper
 rejects pre-enrolled state and sends its key to `tailscale up` through stdin,
-with Tailscale SSH, advertised route acceptance and DNS acceptance disabled.
+with Tailscale SSH and advertised route acceptance disabled. Normal Tailnet DNS
+acceptance stays enabled so private controller/MagicDNS HTTPS names can resolve.
 It saves only non-secret individual fields for the common SSH metadata reader.
 No enrolled tailscaled state, device identity, reusable credential, machine ID
 or SSH host keys may be baked into a reusable template. The existing template

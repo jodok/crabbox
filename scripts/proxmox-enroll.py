@@ -45,7 +45,7 @@ def enroll(stream):
     # /dev/stdin is consumed by tailscale, not interpreted by a shell.
     subprocess.run(
         [TAILSCALE, "up", "--auth-key=file:/dev/stdin", "--hostname=" + hostname,
-         "--advertise-tags=" + ",".join(tags), "--accept-dns=false",
+         "--advertise-tags=" + ",".join(tags), "--accept-dns=true",
          "--accept-routes=false", "--ssh=false", "--timeout=60s"],
         input=key.encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}, timeout=70, check=True,

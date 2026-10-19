@@ -29,6 +29,7 @@ for problem in ('', 'not-root', 'dirty-template', 'join-failure', 'not-running',
                 assert kwargs['stdout'] == subprocess.DEVNULL
                 assert '--auth-key=file:/dev/stdin' in argv
                 assert '--ssh=false' in argv
+                assert '--accept-dns=true' in argv
                 if problem == 'join-failure':
                     raise subprocess.CalledProcessError(1, argv, output=key)
                 return subprocess.CompletedProcess(argv, 0)
