@@ -716,3 +716,116 @@ retry and expect `lease_id_conflict`. Repeat through `crabbox adapter serve
 Finally, remove a required component in a separate test template and confirm the
 named readiness error and owned-clone cleanup. Preserve any unresolved claim
 until Proxmox inventory proves absence.
+
+## Native per-lease Tailnet enrollment
+
+Opt in with `--tailscale --network tailscale --lease-id cbx_<12 lowercase hex>`.
+This bounded path requires Linux, ordinary SSH on port 22, a strictly verified
+HTTPS Proxmox API, and a clean prepared template. It never falls back to LAN SSH,
+uses Tailscale SSH, or embeds a key in cloud-init. Non-fixed allocation, direct
+`tailscale.authKey`/auth-key environment values, exit nodes and insecure TLS are
+rejected before allocation. Existing direct-network behavior is unchanged.
+
+The template must already contain running QGA, cloud-init, OpenSSH, Python 3,
+`/usr/bin/tailscale`, a running but **unenrolled** tailscaled, and the reviewed
+[scripts/proxmox-enroll.py](../../scripts/proxmox-enroll.py) installed root-owned,
+not writable by the lease user, at `/usr/local/libexec/crabbox-enroll`. The helper
+rejects pre-enrolled state and sends its key to `tailscale up` through stdin,
+with Tailscale SSH, advertised route acceptance and DNS acceptance disabled.
+It saves only non-secret individual fields for the common SSH metadata reader.
+No enrolled tailscaled state, device identity, reusable credential, machine ID
+or SSH host keys may be baked into a reusable template. The existing template
+builder does **not** install this Tailnet extension automatically.
+
+Example trusted user config (the broker path is ignored in repository config):
+
+```yaml
+proxmox:
+  tailscaleBroker: /usr/local/libexec/example-tailnet-broker
+network: tailscale
+tailscale:
+  enabled: true
+  tags: [tag:worker]
+  hostnameTemplate: cbx-{id}
+```
+
+Alternatively set `CRABBOX_PROXMOX_TAILSCALE_BROKER` in the controller's protected
+service environment. There is deliberately no executable/credential argv flag.
+Use the existing Tailscale flags/options for tags and hostname. Use a dedicated
+worker tag and issuer, with controller-to-worker TCP 22 permitted. No fleet key,
+coordinator allocation path or broad shared-team service is introduced.
+
+### Broker protocol v1
+
+The operator supplies a trusted local executable; this repository defines and
+mock-tests its contract, **not a production issuer deployment**. It is executed
+without arguments or a shell. One JSON request arrives on stdin; stdout is a
+private bounded JSON response (16 KiB), stderr is discarded. It inherits the
+controller's protected environment, where an operator wrapper may resolve issuer
+credentials. The process deadline is 30 seconds. Do not log stdin/stdout, HTTP
+bodies, keys or issuer credentials in that wrapper or its upstream transports.
+
+An acquisition request contains only non-secret identity and policy:
+
+```json
+{
+  "version": 1,
+  "operation": "acquire",
+  "endpoint": "https://pve.example.test:8006",
+  "node": "pve1",
+  "leaseId": "cbx_012345abcdef",
+  "vmid": "417",
+  "generation": "8be39656-32b0-4c47-b68c-0a9e1d3ef901",
+  "hostname": "cbx-cbx-012345abcdef",
+  "tags": ["tag:worker"]
+}
+```
+
+The response must contain `authKey` (one Tailscale enrollment key), `expiresAt`
+(RFC 3339, after now and no more than ten minutes ahead), `ephemeral:true`, and
+`reusable:false`. Never supply a reusable fleet key. The broker must validate
+endpoint/node, dedicated tag allowlist and hostname, and durably bind the issuance
+and its device-cleanup ownership to **all** of endpoint/node/leaseId/vmid/generation
+before returning a credential. Its issuer must be limited to the admitted worker
+tag. Repeated requests for a bound attempt must not mint independent identities;
+ambiguity, a changed generation or an unsupported request must fail closed.
+
+`release` sends the same identity and policy with `operation:"release"`. Return
+`{"released":true}` only after revoking any unused key and deleting/reconciling
+its enrolled device(s), including an acquisition whose response was lost or
+cancelled. The broker must fence in-flight issuance/enrollment, reconcile the
+unique lease hostname and dedicated tag without touching unrelated devices, and
+make retries idempotent. This requires actual device-cleanup permission in
+addition to `auth_keys`; an auth-key-only issuer is insufficient. If the chosen
+issuer cannot prove this bounded ownership/cleanup contract, do not enable the
+path. Ephemeral-node eventual expiry is not a cleanup acknowledgment.
+
+The CLI persists no key, broker response or issuer secret. Its fixed intent binds
+the network choice, tags, hostname template and broker path. After binding VMID
+and vmgenid, it checks isolated exec permission and QGA readiness, rechecks the VM
+generation, acquires one key and invokes only the prepared helper through native
+`agent/exec` input-data. Native REST input-data is raw stdin; PVE performs QGA's
+base64 encoding. Helper output and error bodies are never exposed as diagnostics.
+
+After successful helper exit, live QGA discovery selects only an IPv4 on exact
+`tailscale0` within `100.64.0.0/10`, deterministically if several are reported.
+SSH bootstrap must succeed using the lease key. Provision, fixed replay,
+resolve/inspect and run share that address policy and normal `TailscaleMetadata`;
+missing QGA/address never reuses a stale saved address or chooses an underlay IP.
+A public-network override cannot downgrade an already Tailnet-bound lease.
+Release does not require guest reachability. Failed/cancelled provisioning retains
+its fixed claim; stop the same canonical lease, not another allocation. VM
+absence is verified, then broker release must succeed before terminal settlement.
+A broker failure leaves the deleting claim retryable even when the VM is gone.
+
+### Additional permission decision
+
+An operator must explicitly approve `VM.GuestAgent.Unrestricted` on the isolated
+worker VM(s) (for example through the dedicated worker pool's runtime principal),
+not on unrelated VMs. It permits guest execution; `VM.GuestAgent.FileWrite` and
+`VM.GuestAgent.Audit` alone cannot enroll a guest. The CLI checks the exact
+`/vms/<vmid>` effective permission before requesting a key and never grants it.
+Keep this privilege, the issuer and device-cleanup authority out of CI. Existing
+clone/audit/config/start/delete/storage/network rights remain necessary. The
+operator still owns strict TLS, clean-template proof, dedicated tag/ACL/issuer
+approval and a real end-to-end allocation/cancellation/cleanup proof.

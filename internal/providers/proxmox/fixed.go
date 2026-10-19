@@ -32,6 +32,7 @@ var fixedProxmoxLeaseKind = core.FixedLeaseKind{
 func fixedProxmoxFingerprint(cfg core.Config, req core.AcquireRequest, providerScope, publicKey string) (string, error) {
 	return core.FixedIntentFingerprint("", core.FixedIntentFields{
 		{Name: "labels", Value: core.DirectLeaseLabels(cfg, req.RequestedLeaseID, core.NormalizeLeaseSlug(req.RequestedSlug), "proxmox", "", req.Keep, time.Unix(0, 0))},
+		{Name: "tailnet", Value: proxmoxTailnetIntent(cfg), OmitEmpty: true},
 		{Name: "sshPort", Value: cfg.SSHPort}, {Name: "providerScope", Value: providerScope},
 		{Name: "node", Value: strings.TrimSpace(cfg.Proxmox.Node)}, {Name: "templateId", Value: cfg.Proxmox.TemplateID},
 		{Name: "storage", Value: strings.TrimSpace(cfg.Proxmox.Storage), OmitEmpty: true},
@@ -181,12 +182,18 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		if err := validateFixedProxmoxServer(server, *claim, attemptVMID, attemptNode); err != nil {
 			return core.LeaseTarget{}, err
 		}
+		if err := core.ValidateProxmoxTailnetAccess(cfg, server); err != nil {
+			return core.LeaseTarget{}, err
+		}
 		target := core.SSHTargetFromConfig(cfg, server.PublicNet.IPv4.IP)
 		if err := waitForSSHReadyFunc(ctx, &target, b.RT.Stderr, "bootstrap", core.BootstrapWaitTimeout(cfg)); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		server.Labels = maps.Clone(server.Labels)
 		server.Labels["state"] = "ready"
+		if server.Labels["tailscale"] == "true" {
+			server.Labels["tailscale_state"] = "ready"
+		}
 		if err := client.SetLabelsOnNode(ctx, server.HostID, server.CloudID, server.Labels); err != nil {
 			return core.LeaseTarget{}, fmt.Errorf("persist Proxmox fixed lease labels: %w", err)
 		}
@@ -265,11 +272,17 @@ func reserveFixedProxmoxVMID(ctx context.Context, client proxmoxClient, claim co
 
 func fixedProxmoxIdentityLabels(cfg core.Config, leaseID, slug, fingerprint, node string) map[string]string {
 	labels := core.FixedIdentityLabels("proxmox", leaseID, slug, fingerprint, map[string]string{"node": node, "template_id": strconv.Itoa(cfg.Proxmox.TemplateID)})
+	if cfg.Tailscale.Enabled {
+		cfg.Tailscale.Hostname = core.RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, "proxmox")
+	}
 	requested := core.DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", false, time.Unix(0, 0))
 	for _, key := range []string{"desktop", "browser", "desktop_env"} {
 		if value, ok := requested[key]; ok {
 			labels[key] = value
 		}
+	}
+	for key, value := range core.ProxmoxTailnetIdentityLabels(cfg, leaseID, slug) {
+		labels[key] = value
 	}
 	return labels
 }
@@ -305,7 +318,7 @@ func (b *leaseBackend) findFixedProxmoxServer(ctx context.Context, client proxmo
 
 func validateFixedProxmoxServer(server core.Server, claim core.LeaseClaim, vmid int, attemptNode string) error {
 	intent := claim.FixedCreateIntent
-	for _, key := range []string{"desktop", "browser", "desktop_env"} {
+	for _, key := range []string{"desktop", "browser", "desktop_env", "tailscale", "tailscale_tags", "tailscale_hostname"} {
 		if server.Labels[key] != claim.Labels[key] {
 			return core.Exit(4, "lease_id_conflict: Proxmox VM for lease %s changed its %s capability", claim.LeaseID, key)
 		}
@@ -389,6 +402,9 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, req core.ReleaseLeaseRe
 		}
 		if present {
 			return core.Exit(4, "lease_id_conflict: fixed Proxmox VMID %d or requested name still exists; claim retained", vmid)
+		}
+		if expected.Labels["tailscale"] == "true" && expected.CloudImmutableID != "" {
+			return core.ReleaseProxmoxTailnet(ctx, b.Cfg, core.Server{Provider: "proxmox", CloudID: expected.CloudID, HostID: expected.Labels["node"], ImmutableID: expected.CloudImmutableID, Labels: expected.Labels})
 		}
 		return nil
 	}
@@ -545,4 +561,17 @@ func (b *leaseBackend) validateFixedCleanupCandidate(claim core.LeaseClaim, serv
 		return err
 	}
 	return validateFixedProxmoxServer(server, claim, vmid, node)
+}
+
+// Omit the extension entirely for legacy/direct intents, preserving their hash.
+func proxmoxTailnetIntent(cfg core.Config) any {
+	if !cfg.Tailscale.Enabled {
+		return nil
+	}
+	return struct {
+		Network          core.NetworkMode
+		Tags             []string
+		HostnameTemplate string
+		Broker           string
+	}{cfg.Network, cfg.Tailscale.Tags, cfg.Tailscale.HostnameTemplate, cfg.Proxmox.TailscaleBroker}
 }

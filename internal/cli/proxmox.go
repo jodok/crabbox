@@ -1106,6 +1106,15 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 	if vmid <= 0 {
 		return Server{}, Exit(2, "proxmox VMID must be positive")
 	}
+	if cfg.Tailscale.Enabled {
+		if err := ValidateProxmoxTailnetConfig(cfg); err != nil {
+			return Server{}, err
+		}
+		if extraLabels["fixed_intent_sha256"] == "" {
+			return Server{}, Exit(2, "Proxmox Tailnet provisioning requires a fixed lease")
+		}
+		cfg.Tailscale.Hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, "proxmox")
+	}
 	name := LeaseProviderName(leaseID, slug)
 	full := "1"
 	if !cfg.Proxmox.FullClone {
@@ -1123,6 +1132,9 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		clone.Set("pool", cfg.Proxmox.Pool)
 	}
 	labels := DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, time.Now().UTC())
+	for key, value := range ProxmoxTailnetIdentityLabels(cfg, leaseID, slug) {
+		labels[key] = value
+	}
 	for key, value := range extraLabels {
 		labels[key] = value
 	}
@@ -1153,11 +1165,13 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		return Server{}, err
 	}
 
+	var boundGeneration string
 	if fixed {
 		server, err := c.getServer(ctx, clonedVMID, true)
 		if err != nil {
 			return Server{}, err
 		}
+		boundGeneration = server.ImmutableID
 		if err := bind(server); err != nil {
 			return Server{}, err
 		}
@@ -1182,10 +1196,25 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		cleanupClone()
 		return Server{}, err
 	}
+	if cfg.Tailscale.Enabled {
+		server, err := c.getServer(ctx, clonedVMID, true)
+		if err != nil {
+			return Server{}, err
+		}
+		if server.ImmutableID != boundGeneration {
+			return Server{}, errors.New("Proxmox Tailnet generation changed after clone")
+		}
+		if err := c.provisionTailnet(ctx, cfg, server); err != nil {
+			return Server{}, err
+		}
+	}
 	server, err := c.waitServerIP(ctx, vmid)
 	if err != nil {
 		cleanupClone()
 		return Server{}, err
+	}
+	if cfg.Tailscale.Enabled && (server.ImmutableID != boundGeneration || server.Labels["lease"] != leaseID || server.Labels["tailscale"] != "true") {
+		return Server{}, errors.New("Proxmox Tailnet identity changed before SSH bootstrap")
 	}
 	if err := c.bootstrapSSH(ctx, server.PublicNet.IPv4.IP, cfg); err != nil {
 		cleanupClone()
@@ -1234,6 +1263,10 @@ func (e *proxmoxBootstrapError) Unwrap() error { return e.cause }
 
 func (c *ProxmoxClient) bootstrapSSH(ctx context.Context, host string, cfg Config) error {
 	target := SSHTargetFromConfig(cfg, host)
+	if cfg.Tailscale.Enabled {
+		target.Port = "22"
+		target.FallbackPorts = nil
+	}
 	deadline := time.Now().Add(10 * time.Minute)
 	for {
 		if proxmoxRunSSHQuietWithOptions(ctx, target, sshTransportProbeCommand(target), "5", "1") == nil {
@@ -1408,7 +1441,15 @@ func (c *ProxmoxClient) getServer(ctx context.Context, id string, requireConfig 
 	} else if requireConfig {
 		return Server{}, configErr
 	}
-	ip, _ := c.guestIPv4(ctx, vmid)
+	ip, _ := c.guestIPv4ForNetwork(ctx, vmid, labels["tailscale"] == "true")
+	if labels["tailscale"] == "true" {
+		// Never route through a stale persisted address when QGA is unavailable.
+		labels["tailscale_ipv4"] = ip
+		labels["tailscale_state"] = "pending"
+		if ip != "" && labels["state"] == "ready" {
+			labels["tailscale_state"] = "ready"
+		}
+	}
 	server := proxmoxVMToServer(c.Node, status, labels, ip)
 	if generation, ok := config["vmgenid"].(string); ok {
 		server.ImmutableID = proxmoxGenerationID(generation)
@@ -1529,27 +1570,49 @@ type proxmoxAgentInterface struct {
 }
 
 func (c *ProxmoxClient) guestIPv4(ctx context.Context, vmid int) (string, error) {
+	return c.guestIPv4ForNetwork(ctx, vmid, false)
+}
+
+func (c *ProxmoxClient) guestIPv4ForNetwork(ctx context.Context, vmid int, tailnet bool) (string, error) {
 	var res struct {
 		Result []proxmoxAgentInterface `json:"result"`
 	}
 	if err := c.doRequired(ctx, http.MethodGet, fmt.Sprintf("/nodes/%s/qemu/%d/agent/network-get-interfaces", url.PathEscape(c.Node), vmid), nil, &res); err != nil {
 		return "", err
 	}
-	for _, iface := range res.Result {
+	return proxmoxInterfaceIPv4(res.Result, tailnet)
+}
+
+func proxmoxInterfaceIPv4(interfaces []proxmoxAgentInterface, tailnet bool) (string, error) {
+	var addresses []string
+	for _, iface := range interfaces {
 		name := strings.ToLower(iface.Name)
+		if tailnet && iface.Name != "tailscale0" {
+			continue
+		}
 		if name == "lo" || strings.HasPrefix(name, "docker") || strings.HasPrefix(name, "veth") {
 			continue
 		}
 		for _, addr := range iface.IPAddresses {
-			if addr.Type != "ipv4" || addr.Address == "" || strings.HasPrefix(addr.Address, "127.") {
+			ip := net.ParseIP(addr.Address)
+			if addr.Type != "ipv4" || ip == nil || ip.To4() == nil || strings.HasPrefix(addr.Address, "127.") {
 				continue
 			}
-			if ip := net.ParseIP(addr.Address); ip != nil && ip.To4() != nil {
-				return addr.Address, nil
+			if tailnet {
+				if !proxmoxTailnetIPv4(addr.Address) {
+					continue
+				}
+				addresses = append(addresses, ip.String())
+			} else {
+				return ip.String(), nil
 			}
 		}
 	}
-	return "", errors.New("no guest ipv4 address reported by qemu guest agent")
+	if tailnet && len(addresses) > 0 {
+		sort.Strings(addresses)
+		return addresses[0], nil
+	}
+	return "", errors.New("no eligible guest ipv4 address reported by qemu guest agent")
 }
 
 func proxmoxVMToServer(node string, vm proxmoxVM, labels map[string]string, ip string) Server {
