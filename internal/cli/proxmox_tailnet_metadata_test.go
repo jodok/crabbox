@@ -34,16 +34,31 @@ def run(argv, **kwargs):
     if len(calls) > 1:
         state = {'BackendState':'Running','Self':{'ID':'nFixtureDevice','TailscaleIPs':['100.100.1.2']}}
     return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(state).encode())
-real_stat = pathlib.Path.stat
-def root_stat(path, **kwargs):
-    values = list(real_stat(path, **kwargs))
+os.umask(0o077)
+real_fstat = os.fstat
+def root_fstat(descriptor):
+    values = list(real_fstat(descriptor))
     values[4] = 0
     return os.stat_result(values)
-with patch.object(pathlib.Path, 'stat', root_stat), patch.object(m.os, 'geteuid', return_value=0), patch.object(m.subprocess, 'run', side_effect=run):
+with patch.object(m.os, 'fstat', root_fstat), patch.object(m.os, 'geteuid', return_value=0), patch.object(m.subprocess, 'run', side_effect=run):
     m.enroll(io.StringIO(json.dumps({'authKey':'tskey-auth-fixture','hostname':'cbx-fixture','tags':['tag:worker']})))
 `
 	if out, err := exec.Command("python3", "-c", script, dir).CombinedOutput(); err != nil {
 		t.Fatalf("helper: %v %s", err, out)
+	}
+	for _, item := range []struct {
+		path string
+		mode os.FileMode
+	}{
+		{dir, 0755},
+		{filepath.Join(dir, "tailscale-ipv4"), 0644},
+		{filepath.Join(dir, "tailscale-hostname"), 0644},
+		{filepath.Join(dir, "tailscale-device-id"), 0644},
+	} {
+		info, err := os.Stat(item.path)
+		if err != nil || info.Mode().Perm() != item.mode {
+			t.Fatalf("helper receipt must be readable under QGA umask: path=%s info=%v err=%v", item.path, info, err)
+		}
 	}
 	run := func(ctx context.Context, _ SSHTarget, remote string) (string, error) {
 		out, err := exec.CommandContext(ctx, "sh", "-c", strings.ReplaceAll(remote, "/var/lib/crabbox", dir)).Output()
