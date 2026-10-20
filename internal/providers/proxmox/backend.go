@@ -367,8 +367,14 @@ func (b *leaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.L
 	if err != nil {
 		return nil, err
 	}
+	claims, err := core.ListLeaseClaims()
+	if err != nil {
+		// Ownership cannot be classified. Do not relabel ordinary direct VMs as
+		// Tailnet failures or return unverified addresses for managed leases.
+		return nil, err
+	}
 	for i := range servers {
-		if err := b.validateTailnetBinding(&servers[i]); err != nil {
+		if err := b.validateTailnetBindingWithClaims(&servers[i], claims); err != nil {
 			// Inventory is diagnostic, not access authorization. Retained failed
 			// attempts must remain visible without hiding other healthy leases or
 			// presenting mutable receipt/routing labels as verified metadata.
@@ -792,6 +798,10 @@ func (b *leaseBackend) validateTailnetBinding(server *core.Server) error {
 	if err != nil {
 		return err
 	}
+	return b.validateTailnetBindingWithClaims(server, claims)
+}
+
+func (b *leaseBackend) validateTailnetBindingWithClaims(server *core.Server, claims []core.LeaseClaim) error {
 	found := false
 	for _, claim := range claims {
 		if !fixedProxmoxLeaseKind.IsFixedClaim(claim) || claim.Labels["tailscale"] != "true" || claim.ProviderScope != core.ProviderClaimScope("proxmox", b.Cfg) {

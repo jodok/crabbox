@@ -513,3 +513,38 @@ func TestProxmoxTailnetNativeStatusBoolean(t *testing.T) {
 		}
 	}
 }
+
+func TestProxmoxTailnetRejectsHelperBoundsBeforeNativeClone(t *testing.T) {
+	for _, problem := range []string{"hostname", "tags"} {
+		t.Run(problem, func(t *testing.T) {
+			cfg := tailnetTestConfig()
+			cfg.Proxmox.TokenID, cfg.Proxmox.TokenSecret = "runner@pve!worker", "fixture-provider-token"
+			if problem == "hostname" {
+				cfg.Tailscale.HostnameTemplate = "prefix-{slug}"
+			} else {
+				for i := 0; i < 32; i++ {
+					cfg.Tailscale.Tags = append(cfg.Tailscale.Tags, fmt.Sprintf("tag:worker-%d", i))
+				}
+			}
+			calls, issued := 0, 0
+			api := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls++; w.WriteHeader(500) }))
+			defer api.Close()
+			cfg.Proxmox.APIURL = api.URL
+			client, err := NewProxmoxClient(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client.Client = api.Client()
+			previous := proxmoxRunTailnetBroker
+			proxmoxRunTailnetBroker = func(context.Context, string, proxmoxTailnetBrokerRequest) (proxmoxTailnetCredential, error) {
+				issued++
+				return proxmoxTailnetCredential{}, nil
+			}
+			t.Cleanup(func() { proxmoxRunTailnetBroker = previous })
+			_, err = client.CreateServerWithVMID(t.Context(), cfg, "ssh-ed25519 AAAA fixture", "cbx_123456abcdef", strings.Repeat("a", 60), true, 417, map[string]string{"fixed_intent_sha256": "bound-intent"}, func(Server) error { return nil })
+			if err == nil || calls != 0 || issued != 0 {
+				t.Fatalf("late admission: calls=%d issued=%d err=%v", calls, issued, err)
+			}
+		})
+	}
+}

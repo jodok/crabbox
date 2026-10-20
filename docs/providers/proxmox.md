@@ -805,8 +805,14 @@ issuer cannot prove this bounded ownership/cleanup contract, do not enable the
 path. Ephemeral-node eventual expiry is not a cleanup acknowledgment.
 
 The CLI persists no key, broker response or issuer secret. Its fixed intent binds
-the network choice, tags, hostname template and broker path. After binding VMID
-and vmgenid, it checks isolated exec permission and QGA readiness, rechecks the VM
+the network choice, tags, hostname template and broker path. Before clone or key
+issuance, admission requires 1–32 unique tags (`tag:` followed by a lowercase
+alphanumeric name with optional hyphens, at most 63 name characters) and the
+**final rendered** hostname (1–63 lowercase alphanumeric/hyphen characters,
+starting with an alphanumeric character). Templates are not truncated to fit;
+choose a shorter template or slug if rendering exceeds the helper's limit.
+The clone attempt also persists the trusted absolute broker path locally, not
+in the VM description. After binding VMID and vmgenid, it checks isolated exec permission and QGA readiness, rechecks the VM
 generation, acquires one key and invokes only the prepared helper through native
 `agent/exec` input-data. Native REST input-data is raw stdin; PVE performs QGA's
 base64 encoding. Helper output and error bodies are never exposed as diagnostics.
@@ -838,13 +844,39 @@ their existing optional, best-effort metadata refresh behavior.
 Inventory listing remains diagnostic: an incomplete or unverifiable Tailnet lease
 stays visible with `tailscale_state=unverified`, no reported device ID or access
 address, and an error for recovery; it does not hide healthy leases. This does not
-authorize resolve, replay, sync or command access.
+authorize resolve, replay, sync or command access. A local claim scan failure
+makes ownership unclassifiable and fails the list operation; it does not turn
+ordinary direct VMs into Tailnet leases or silently remove their public addresses.
 
 A public-network override cannot downgrade an already Tailnet-bound lease.
 Release does not require guest reachability. Failed/cancelled provisioning retains
 its fixed claim; stop the same canonical lease, not another allocation. VM
 absence is verified, then broker release must succeed before terminal settlement.
 A broker failure leaves the deleting claim retryable even when the VM is gone.
+Before deleting a VM (or settling an already absent VM), release checks the
+locally bound broker path, even when the invocation omits `--tailscale`. A changed
+or missing binding fails before deletion or broker invocation. Restoring the
+bound executable **and its original issuance ledger** permits ordinary release
+retry; changing the path to a new empty ledger is not cleanup.
+
+#### Broker migration and legacy recovery
+
+Do not switch issuance owners while leases remain active. Pause new allocations,
+retain the original broker and ledger at the bound path, release each owned
+lease through that broker, and verify its key/device cleanup acknowledgments
+before configuring a new broker for new leases. A compatible wrapper at the
+bound path must still reconcile the original ledger; a matching path alone
+cannot prove that an operator has preserved executable contents or ledger data.
+Never replace either in place with an unrelated issuer.
+
+Older experimental Tailnet claims whose attempts lack `tailscaleBroker` remain
+inspectable but cannot authorize CLI release, including when the VM is already
+absent. Do not infer their cleanup owner from current configuration, backfill the
+binding blindly, delete the claim, or mark it terminal. The operator must recover
+the original issuance owner from trusted allocation records, fence issuance and
+reconcile that owner's exact endpoint/node/lease/VMID/generation key and device
+ledger. Preserve the claim and evidence for a separately reviewed explicit
+migration/recovery; this change does not supply a legacy binding migration tool.
 
 ### Additional permission decision
 

@@ -1113,6 +1113,9 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		if extraLabels["fixed_intent_sha256"] == "" {
 			return Server{}, Exit(2, "Proxmox Tailnet provisioning requires a fixed lease")
 		}
+		if err := ValidateProxmoxTailnetIdentity(cfg, leaseID, slug); err != nil {
+			return Server{}, err
+		}
 		cfg.Tailscale.Hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, "proxmox")
 	}
 	name := LeaseProviderName(leaseID, slug)

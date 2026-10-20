@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"os"
@@ -447,5 +448,178 @@ func TestProxmoxTailnetListRetainsIncompleteAttemptsWithoutGrantingAccess(t *tes
 	}
 	if client.fixedCreates != 2 || client.nextCalls != 2 {
 		t.Fatal("inventory allocated or reissued")
+	}
+}
+
+func TestProxmoxTailnetReleaseRejectsChangedOrUnboundBrokerBeforeDelete(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX executable fixture")
+	}
+	for _, problem := range []string{"changed", "changed absent", "changed cancelled", "missing legacy binding"} {
+		t.Run(problem, func(t *testing.T) {
+			backend, client, req := tailnetFixedFixture(t)
+			client.cancelAfterBind = problem == "changed cancelled"
+			client.beforeClone = func(_ int, labels map[string]string) error {
+				claim := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+				if claim.FixedCreateIntent.Attempt["tailscaleBroker"] != backend.Cfg.Proxmox.TailscaleBroker || labels["tailscaleBroker"] != "" {
+					t.Fatal("clone preceded local-only broker binding")
+				}
+				return nil
+			}
+			target, err := backend.Acquire(t.Context(), req)
+			if client.cancelAfterBind {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatal(err)
+				}
+				target = core.LeaseTarget{LeaseID: req.RequestedLeaseID}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			boundBroker := backend.Cfg.Proxmox.TailscaleBroker
+			called := filepath.Join(t.TempDir(), "broker-called")
+			script := "#!/bin/sh\ntouch '" + called + "'\nprintf '{\"released\":true}'\n"
+			if err := os.WriteFile(boundBroker, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			claim := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+			if claim.FixedCreateIntent.Attempt["tailscaleBroker"] != boundBroker {
+				t.Fatal("broker not durable")
+			}
+			if _, ok := client.servers[0].Labels["tailscaleBroker"]; ok {
+				t.Fatal("local broker copied to remote labels")
+			}
+			if problem == "missing legacy binding" {
+				delete(claim.FixedCreateIntent.Attempt, "tailscaleBroker")
+				data, err := json.Marshal(claim)
+				if err != nil {
+					t.Fatal(err)
+				}
+				dir, err := core.CrabboxStateDir()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "claims", claim.LeaseID+".json"), data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				backend.Cfg.Proxmox.TailscaleBroker = boundBroker + "-replacement"
+				if err := os.WriteFile(backend.Cfg.Proxmox.TailscaleBroker, []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if problem == "changed absent" {
+				client.servers = nil
+			}
+			before := len(client.servers)
+			// Omitting --tailscale must not bypass persisted cleanup ownership.
+			backend.Cfg.Tailscale.Enabled = false
+			if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: target}); err == nil || !strings.Contains(err.Error(), "cleanup broker") {
+				t.Fatalf("release: %v", err)
+			}
+			retained := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+			if len(client.servers) != before || retained.FixedCreateIntent.State != claim.FixedCreateIntent.State || retained.CloudImmutableID != claim.CloudImmutableID {
+				t.Fatal("broker drift mutated VM or claim lifecycle")
+			}
+			if _, err := os.Stat(called); !os.IsNotExist(err) {
+				t.Fatalf("broker was called: %v", err)
+			}
+			if problem != "missing legacy binding" {
+				backend.Cfg.Proxmox.TailscaleBroker = boundBroker
+				if err := backend.ReleaseLease(t.Context(), core.ReleaseLeaseRequest{Lease: target}); err != nil {
+					t.Fatal(err)
+				}
+				if len(client.servers) != 0 || readFixedProxmoxClaim(t, req.RequestedLeaseID).FixedCreateIntent.State != "released" {
+					t.Fatal("restored owner did not settle")
+				}
+				if _, err := os.Stat(called); err != nil {
+					t.Fatal("bound broker not called", err)
+				}
+			}
+			if client.fixedCreates != 1 {
+				t.Fatal("release allocated")
+			}
+		})
+	}
+}
+
+func TestProxmoxTailnetHelperBoundsPrecedeAllocation(t *testing.T) {
+	for _, problem := range []string{"33 tags", "duplicate tags", "underscore tag", "leading hyphen tag", "long static hostname", "long rendered slug", "63 character hostname", "32 tags"} {
+		t.Run(problem, func(t *testing.T) {
+			backend, client, req := tailnetFixedFixture(t)
+			valid := false
+			switch problem {
+			case "33 tags", "32 tags":
+				count := 33
+				if problem == "32 tags" {
+					count, valid = 32, true
+				}
+				backend.Cfg.Tailscale.Tags = nil
+				for i := 0; i < count; i++ {
+					backend.Cfg.Tailscale.Tags = append(backend.Cfg.Tailscale.Tags, fmt.Sprintf("tag:worker-%d", i))
+				}
+			case "duplicate tags":
+				backend.Cfg.Tailscale.Tags = []string{"tag:worker", "tag:worker"}
+			case "underscore tag":
+				backend.Cfg.Tailscale.Tags = []string{"tag:worker_one"}
+			case "leading hyphen tag":
+				backend.Cfg.Tailscale.Tags = []string{"tag:-worker"}
+			case "long static hostname":
+				backend.Cfg.Tailscale.HostnameTemplate = strings.Repeat("a", 64)
+			case "long rendered slug":
+				backend.Cfg.Tailscale.HostnameTemplate = "prefix-{slug}"
+				req.RequestedSlug = strings.Repeat("a", 60)
+			case "63 character hostname":
+				backend.Cfg.Tailscale.HostnameTemplate = "prefix-{slug}"
+				req.RequestedSlug, valid = strings.Repeat("a", 56), true
+			}
+			_, err := backend.Acquire(t.Context(), req)
+			if valid {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if client.fixedCreates != 1 {
+					t.Fatal("boundary was not admitted")
+				}
+			} else {
+				if err == nil {
+					t.Fatal("unsupported helper input admitted")
+				}
+				if client.fixedCreates != 0 || client.nextCalls != 0 {
+					t.Fatal("helper validation followed allocation")
+				}
+			}
+		})
+	}
+}
+
+func TestProxmoxListPropagatesUnclassifiableClaimScanFailure(t *testing.T) {
+	backend, client, _ := fixedProxmoxFixture(t)
+	server := core.Server{Provider: "proxmox", CloudID: "417", Labels: map[string]string{"crabbox": "true", "provider": "proxmox"}}
+	server.PublicNet.IPv4.IP = "192.0.2.17"
+	client.servers = []core.Server{server}
+	dir, err := core.CrabboxStateDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := filepath.Join(dir, "claims")
+	if err := os.MkdirAll(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := filepath.Join(claims, "cbx_abcdef123456.json")
+	if err := os.WriteFile(corrupt, []byte("not-json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if servers, err := backend.List(t.Context(), core.ListRequest{All: true}); err == nil || len(servers) != 0 {
+		t.Fatalf("claim scan misclassified direct inventory: %+v %v", servers, err)
+	}
+	if client.servers[0].Labels["tailscale"] != "" || client.servers[0].PublicNet.IPv4.IP != "192.0.2.17" {
+		t.Fatal("ordinary source VM mutated")
+	}
+	if err := os.Remove(corrupt); err != nil {
+		t.Fatal(err)
+	}
+	servers, err := backend.List(t.Context(), core.ListRequest{All: true})
+	if err != nil || len(servers) != 1 || servers[0].Labels["tailscale"] != "" || servers[0].PublicNet.IPv4.IP != "192.0.2.17" {
+		t.Fatalf("healthy public diagnostic changed: %+v %v", servers, err)
 	}
 }

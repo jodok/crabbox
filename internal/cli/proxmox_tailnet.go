@@ -36,7 +36,54 @@ func ValidateProxmoxTailnetConfig(cfg Config) error {
 	if !filepath.IsAbs(cfg.Proxmox.TailscaleBroker) {
 		return Exit(3, "proxmox.tailscaleBroker must be a trusted absolute executable path (user config or CRABBOX_PROXMOX_TAILSCALE_BROKER)")
 	}
-	return validateNetworkConfig(cfg)
+	if err := validateNetworkConfig(cfg); err != nil {
+		return err
+	}
+	return validateProxmoxTailnetTags(cfg.Tailscale.Tags)
+}
+
+// Keep admission aligned with the prepared helper before clone or key issuance.
+func validateProxmoxTailnetTags(tags []string) error {
+	if len(tags) == 0 || len(tags) > 32 {
+		return Exit(2, "Proxmox Tailnet enrollment requires 1–32 unique tags")
+	}
+	seen := make(map[string]bool, len(tags))
+	for _, tag := range tags {
+		name := strings.TrimPrefix(tag, "tag:")
+		if !strings.HasPrefix(tag, "tag:") || !validProxmoxTailnetName(name, 63) || seen[tag] {
+			return Exit(2, "Proxmox Tailnet enrollment requires unique tags with alphanumeric names and hyphens")
+		}
+		seen[tag] = true
+	}
+	return nil
+}
+
+func validProxmoxTailnetName(value string, limit int) bool {
+	if len(value) == 0 || len(value) > limit {
+		return false
+	}
+	for i, ch := range []byte(value) {
+		if ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || i > 0 && ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// ValidateProxmoxTailnetIdentity validates the exact final rendering, not a
+// template estimate. Call after slug allocation and before reserving a VMID.
+func ValidateProxmoxTailnetIdentity(cfg Config, leaseID, slug string) error {
+	if !cfg.Tailscale.Enabled {
+		return nil
+	}
+	if err := validateProxmoxTailnetTags(cfg.Tailscale.Tags); err != nil {
+		return err
+	}
+	if !validProxmoxTailnetName(RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, "proxmox"), 63) {
+		return Exit(2, "Proxmox Tailnet rendered hostname must be 1–63 lowercase alphanumeric or hyphen characters, starting with alphanumeric")
+	}
+	return nil
 }
 
 // Native descriptions are not cloud label sets: keep structured tag syntax
@@ -178,6 +225,12 @@ func (c *ProxmoxClient) provisionTailnet(ctx context.Context, cfg Config, server
 	defer cancel()
 	request, err := proxmoxTailnetRequest(cfg, server, "acquire")
 	if err != nil {
+		return err
+	}
+	if !validProxmoxTailnetName(request.Hostname, 63) {
+		return Exit(2, "invalid Proxmox Tailnet rendered hostname")
+	}
+	if err := validateProxmoxTailnetTags(request.Tags); err != nil {
 		return err
 	}
 	// Check the exact isolated capability before issuing a key. This check never

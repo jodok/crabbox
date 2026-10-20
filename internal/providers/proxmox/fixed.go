@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -136,13 +137,21 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		}
 		return result, nil
 	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
+		if err := core.ValidateProxmoxTailnetIdentity(cfg, leaseID, claim.Slug); err != nil {
+			return core.FixedAttemptPlan{}, err
+		}
 		vmid, err := reserveFixedProxmoxVMID(ctx, client, claim)
 		if err != nil {
 			return core.FixedAttemptPlan{}, fixedProxmoxAuthorizationRejection(err)
 		}
 		node := strings.TrimSpace(cfg.Proxmox.Node)
+		values := map[string]string{"vmid": strconv.Itoa(vmid), "node": node}
+		if cfg.Tailscale.Enabled {
+			// Local-only ownership record, committed before clone or issuance.
+			values["tailscaleBroker"] = cfg.Proxmox.TailscaleBroker
+		}
 		return core.FixedAttemptPlan{
-			Values:          map[string]string{"vmid": strconv.Itoa(vmid), "node": node},
+			Values:          values,
 			UniqueProviders: []string{"proxmox", core.FixedProxmoxClaimProvider}, UniqueLabel: "Proxmox",
 			Identity: core.FixedResourceBinding{CloudID: strconv.Itoa(vmid), NumericID: int64(vmid)},
 			Labels:   fixedProxmoxIdentityLabels(cfg, leaseID, claim.Slug, fingerprint, node),
@@ -314,7 +323,14 @@ func fixedProxmoxAttempt(claim core.LeaseClaim) (int, string, error) {
 	if err := core.ValidateFixedClaim(claim, rules); err != nil {
 		return 0, "", err
 	}
-	attempt, err := core.ReadFixedAttempt[map[string]string](claim.FixedCreateIntent, core.FixedAttemptFormat{ExactKeys: 2, Required: []string{"node"}, PositiveIntegers: []string{"vmid"}})
+	exactKeys := 2
+	if _, bound := claim.FixedCreateIntent.Attempt["tailscaleBroker"]; bound {
+		exactKeys = 3
+		if claim.Labels["tailscale"] != "true" || !filepath.IsAbs(claim.FixedCreateIntent.Attempt["tailscaleBroker"]) {
+			return 0, "", core.Exit(4, "lease_id_conflict: invalid Proxmox Tailnet broker binding")
+		}
+	}
+	attempt, err := core.ReadFixedAttempt[map[string]string](claim.FixedCreateIntent, core.FixedAttemptFormat{ExactKeys: exactKeys, Required: []string{"node"}, PositiveIntegers: []string{"vmid"}})
 	if err != nil || attempt == nil {
 		return 0, "", err
 	}
@@ -441,6 +457,9 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, req core.ReleaseLeaseRe
 			if claim.FixedCreateIntent.State == "released" {
 				err := fixedProxmoxLeaseKind.ValidateTerminalClaim(*claim, core.LeaseClaim{}, leaseID, validateFixedProxmoxTerminalClaim)
 				return core.FixedObservation[core.Server]{AbsenceProven: err == nil}, err
+			}
+			if err := validateProxmoxCleanupBroker(*claim, b.Cfg); err != nil {
+				return result, err
 			}
 			if recoverPrepared && (claim.FixedCreateIntent.State != "prepared" || claim.CloudImmutableID != "") {
 				return result, core.Exit(4, "Proxmox forced absence recovery requires a prepared claim without a bound generation; inspect the VM and use ordinary stop")
@@ -595,4 +614,18 @@ func proxmoxTailnetIntent(cfg core.Config) any {
 		HostnameTemplate string
 		Broker           string
 	}{cfg.Network, cfg.Tailscale.Tags, cfg.Tailscale.HostnameTemplate, cfg.Proxmox.TailscaleBroker}
+}
+
+// Never delete a VM or settle an absent one using a different issuance ledger.
+// Legacy Tailnet attempts without this binding require operator reconciliation;
+// the current configuration alone is not evidence of the original broker.
+func validateProxmoxCleanupBroker(claim core.LeaseClaim, cfg core.Config) error {
+	if claim.Labels["tailscale"] != "true" {
+		return nil
+	}
+	broker := claim.FixedCreateIntent.Attempt["tailscaleBroker"]
+	if !filepath.IsAbs(broker) || broker != cfg.Proxmox.TailscaleBroker {
+		return core.Exit(4, "lease_id_conflict: Proxmox Tailnet cleanup broker is missing or changed; restore the bound broker and original issuance ledger before release (see docs/providers/proxmox.md)")
+	}
+	return nil
 }
