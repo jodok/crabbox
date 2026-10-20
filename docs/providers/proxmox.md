@@ -821,7 +821,10 @@ the prepared helper through native
 `agent/exec` input-data. Native REST input-data is raw stdin; PVE performs QGA's
 base64 encoding. Acquire requests use the original claim-checked clone policy,
 not later mutable descriptions; hostname/tag drift fails before key issuance.
-Helper output and error bodies are never exposed as diagnostics.
+Helper output and error bodies are never exposed as diagnostics. The root helper
+sets the checked metadata directory to `0755` and non-secret receipt files to
+`0644` explicitly, independent of QGA's umask, so the lease SSH user can read them;
+ownership checks and no-follow descriptor handling remain enforced.
 
 After successful helper exit, live QGA discovery selects only an IPv4 on exact
 `tailscale0` within `100.64.0.0/10`, deterministically if several are reported.

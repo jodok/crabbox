@@ -13,11 +13,23 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 key = 'tskey-auth-not-a-real-enrollment-key'
 request = {'authKey': key, 'hostname': 'cbx-example', 'tags': ['tag:worker']}
-for problem in ('', 'not-root', 'dirty-template', 'join-failure', 'not-running', 'lan-ip', 'symlink', 'missing-id', 'empty-id'):
+# Reproduce the QGA execution mask; only this isolated Python fixture is affected.
+os.umask(0o077)
+for problem in ('', 'private-existing', 'not-root', 'dirty-template', 'join-failure', 'not-running', 'lan-ip', 'symlink', 'receipt-symlink', 'missing-id', 'empty-id'):
     with tempfile.TemporaryDirectory() as directory:
         m.METADATA = pathlib.Path(directory) / 'metadata'
+        success = problem in ('', 'private-existing')
         if problem == 'symlink':
             m.METADATA.symlink_to(directory, target_is_directory=True)
+        if problem in ('private-existing', 'receipt-symlink'):
+            m.METADATA.mkdir(mode=0o700)
+        if problem == 'private-existing':
+            for name in ('tailscale-ipv4', 'tailscale-hostname', 'tailscale-device-id'):
+                (m.METADATA / name).write_text('old receipt')
+        if problem == 'receipt-symlink':
+            external = pathlib.Path(directory) / 'external'
+            external.write_text('do not modify')
+            (m.METADATA / 'tailscale-ipv4').symlink_to(external)
         calls = []
         def run(argv, **kwargs):
             calls.append((argv, kwargs))
@@ -48,27 +60,34 @@ for problem in ('', 'not-root', 'dirty-template', 'join-failure', 'not-running',
             return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(state).encode())
         # Test fixtures run without root. Production requires root ownership;
         # substitute only the fixture's stat owner, retaining real file I/O.
-        real_stat = pathlib.Path.stat
-        def root_stat(path, **kwargs):
-            value = real_stat(path, **kwargs)
-            values = list(value)
+        real_fstat = os.fstat
+        def root_fstat(descriptor):
+            values = list(real_fstat(descriptor))
             values[4] = 0
             return os.stat_result(values)
-        with patch.object(pathlib.Path, 'stat', root_stat), patch.object(m.os, 'geteuid', return_value=1000 if problem == 'not-root' else 0), patch.object(m.subprocess, 'run', side_effect=run):
+        with patch.object(m.os, 'fstat', root_fstat), patch.object(m.os, 'geteuid', return_value=1000 if problem == 'not-root' else 0), patch.object(m.subprocess, 'run', side_effect=run):
             failed = False
             try:
                 m.enroll(io.StringIO(json.dumps(request)))
             except Exception:
-                if not problem:
+                if success:
                     raise
                 failed = True
-            assert failed == bool(problem), problem
+            assert failed != success, problem
         for path in pathlib.Path(directory).rglob('*'):
             if path.is_file() and not path.is_symlink():
                 assert key not in path.read_text()
-        if problem == '':
+        if success:
             assert (m.METADATA / 'tailscale-ipv4').read_text() == '100.100.1.2\n'
             assert (m.METADATA / 'tailscale-device-id').read_text() == 'nFixtureDevice\n'
+            assert m.METADATA.stat().st_mode & 0o777 == 0o755
+            for name in ('tailscale-ipv4', 'tailscale-hostname', 'tailscale-device-id'):
+                assert (m.METADATA / name).stat().st_mode & 0o777 == 0o644
+        if problem == 'receipt-symlink':
+            assert external.read_text() == 'do not modify'
+            assert external.stat().st_mode & 0o777 == 0o600
+        if problem == 'symlink':
+            assert pathlib.Path(directory).stat().st_mode & 0o777 == 0o700
         if problem == 'dirty-template':
             assert len(calls) == 1
 for request in ({'authKey': key, 'hostname': '--bad', 'tags': ['tag:worker']}, {'authKey': key, 'hostname': 'safe', 'tags': []}, {'authKey': 'invalid', 'hostname': 'safe', 'tags': ['tag:worker']}):

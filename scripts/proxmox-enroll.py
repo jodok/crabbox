@@ -69,8 +69,16 @@ def enroll(stream):
     if METADATA.is_symlink():
         raise ValueError("metadata symlink")
     METADATA.mkdir(mode=0o755, parents=True, exist_ok=True)
-    if METADATA.stat().st_uid != 0 or METADATA.stat().st_mode & 0o022:
-        raise ValueError("metadata permissions")
+    directory = os.open(METADATA, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory)
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ValueError("metadata permissions")
+        # QGA may run with umask 077. These non-secret receipts must be readable
+        # by the lease SSH user; change only the checked, non-symlink inode.
+        os.fchmod(directory, 0o755)
+    finally:
+        os.close(directory)
     values = {
         "tailscale-ipv4": sorted(str(ip) for ip in addresses if ip.version == 4 and ip in ipaddress.ip_network("100.64.0.0/10"))[0],
         "tailscale-hostname": hostname,
@@ -80,6 +88,7 @@ def enroll(stream):
         # Do not follow an image-provided or lease-user-controlled symlink.
         descriptor = os.open(METADATA / name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
         with os.fdopen(descriptor, "w") as output:
+            os.fchmod(output.fileno(), 0o644)
             output.write(value + "\n")
 
 
