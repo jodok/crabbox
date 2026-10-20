@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"net"
 	"net/http"
@@ -1169,6 +1170,7 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 	}
 
 	var boundGeneration string
+	var boundTailnetServer Server
 	if fixed {
 		server, err := c.getServer(ctx, clonedVMID, true)
 		if err != nil {
@@ -1178,6 +1180,10 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		if err := bind(server); err != nil {
 			return Server{}, err
 		}
+		// Preserve policy from the claim-checked clone inputs, not a later
+		// mutable description read. Bind has verified the live generation.
+		boundTailnetServer = server
+		boundTailnetServer.Labels = maps.Clone(labels)
 	}
 	description := proxmoxDescription(labels)
 	config := url.Values{
@@ -1204,10 +1210,10 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		if err != nil {
 			return Server{}, err
 		}
-		if server.ImmutableID != boundGeneration {
-			return Server{}, errors.New("Proxmox Tailnet generation changed after clone")
+		if err := validateProxmoxTailnetEnrollmentBinding(server, boundTailnetServer); err != nil {
+			return Server{}, err
 		}
-		if err := c.provisionTailnet(ctx, cfg, server); err != nil {
+		if err := c.provisionTailnet(ctx, cfg, boundTailnetServer); err != nil {
 			return Server{}, err
 		}
 	}

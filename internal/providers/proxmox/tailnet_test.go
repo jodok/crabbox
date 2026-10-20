@@ -587,6 +587,25 @@ func TestProxmoxTailnetHelperBoundsPrecedeAllocation(t *testing.T) {
 				if client.fixedCreates != 0 || client.nextCalls != 0 {
 					t.Fatal("helper validation followed allocation")
 				}
+				if _, exists, err := core.ReadLeaseClaimWithPresence(req.RequestedLeaseID); err != nil || exists {
+					t.Fatalf("rejected helper input stranded a claim: exists=%v err=%v", exists, err)
+				}
+				key, err := core.TestboxKeyPath(req.RequestedLeaseID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(key); !os.IsNotExist(err) {
+					t.Fatalf("rejected helper input retained a key: %v", err)
+				}
+				// A corrected request must be able to use the same canonical ID.
+				backend.Cfg.Tailscale.Tags = []string{"tag:worker"}
+				backend.Cfg.Tailscale.HostnameTemplate = "cbx-{id}"
+				if _, err := backend.Acquire(t.Context(), req); err != nil {
+					t.Fatalf("corrected request cannot reuse ID: %v", err)
+				}
+				if client.fixedCreates != 1 || client.nextCalls != 1 {
+					t.Fatal("corrected request allocated incorrectly")
+				}
 			}
 		})
 	}
@@ -621,5 +640,21 @@ func TestProxmoxListPropagatesUnclassifiableClaimScanFailure(t *testing.T) {
 	servers, err := backend.List(t.Context(), core.ListRequest{All: true})
 	if err != nil || len(servers) != 1 || servers[0].Labels["tailscale"] != "" || servers[0].PublicNet.IPv4.IP != "192.0.2.17" {
 		t.Fatalf("healthy public diagnostic changed: %+v %v", servers, err)
+	}
+}
+
+func TestProxmoxTailnetInvalidReplayCannotRetireExistingClaim(t *testing.T) {
+	backend, client, req := tailnetFixedFixture(t)
+	if _, err := backend.Acquire(t.Context(), req); err != nil {
+		t.Fatal(err)
+	}
+	before := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+	backend.Cfg.Tailscale.HostnameTemplate = strings.Repeat("a", 64)
+	if _, err := backend.Acquire(t.Context(), req); err == nil {
+		t.Fatal("invalid replay admitted")
+	}
+	after := readFixedProxmoxClaim(t, req.RequestedLeaseID)
+	if after.CloudImmutableID != before.CloudImmutableID || after.FixedCreateIntent.State != "acquired" || after.FixedCreateIntent.Fingerprint != before.FixedCreateIntent.Fingerprint || client.fixedCreates != 1 || client.nextCalls != 1 {
+		t.Fatal("invalid replay retired or replaced existing ownership")
 	}
 }

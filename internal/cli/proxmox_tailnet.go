@@ -220,6 +220,20 @@ func ReleaseProxmoxTailnet(ctx context.Context, cfg Config, server Server) error
 	return err
 }
 
+// Both identity and issuance policy must still match the durable clone inputs.
+// Agreement between successive mutable description reads is not ownership.
+func validateProxmoxTailnetEnrollmentBinding(current, bound Server) error {
+	if current.Provider != bound.Provider || current.CloudID != bound.CloudID || current.HostID != bound.HostID || current.ImmutableID != bound.ImmutableID {
+		return errors.New("Proxmox Tailnet guest identity changed before enrollment")
+	}
+	for _, key := range []string{"lease", "fixed_intent_sha256", "tailscale", "tailscale_hostname", "tailscale_tags"} {
+		if current.Labels[key] != bound.Labels[key] {
+			return errors.New("Proxmox Tailnet guest identity or bound policy changed before enrollment")
+		}
+	}
+	return nil
+}
+
 func (c *ProxmoxClient) provisionTailnet(ctx context.Context, cfg Config, server Server) error {
 	ctx, cancel := context.WithTimeout(ctx, BootstrapWaitTimeout(cfg))
 	defer cancel()
@@ -262,8 +276,8 @@ func (c *ProxmoxClient) provisionTailnet(ctx context.Context, cfg Config, server
 	if err != nil {
 		return err
 	}
-	if current.ImmutableID != server.ImmutableID || current.Labels["lease"] != request.LeaseID || current.Labels["fixed_intent_sha256"] != server.Labels["fixed_intent_sha256"] {
-		return errors.New("Proxmox Tailnet guest identity changed before enrollment")
+	if err := validateProxmoxTailnetEnrollmentBinding(current, server); err != nil {
+		return err
 	}
 	credential, err := proxmoxRunTailnetBroker(ctx, cfg.Proxmox.TailscaleBroker, request)
 	if err != nil {

@@ -121,7 +121,7 @@ func TestProxmoxTailnetSelectsOnlyTailscale0(t *testing.T) {
 }
 
 func TestProxmoxTailnetNativeEnrollmentAndFailClosedRouting(t *testing.T) {
-	for _, problem := range []string{"", "boolean flags", "numeric running", "denied", "generation", "exec echo", "status echo", "helper failure", "no pid", "cancel", "no tailscale0"} {
+	for _, problem := range []string{"", "boolean flags", "numeric running", "denied", "generation", "exec echo", "status echo", "helper failure", "no pid", "cancel", "no tailscale0", "changed hostname", "changed tags"} {
 		t.Run(problem, func(t *testing.T) {
 			cfg, server := tailnetTestConfig(), tailnetTestServer()
 			server.Labels["tailscale_fqdn"] = "10.77.1.32"
@@ -161,7 +161,17 @@ func TestProxmoxTailnetNativeEnrollmentAndFailClosedRouting(t *testing.T) {
 					if problem == "generation" {
 						generation = "9be39656-32b0-4c47-b68c-0a9e1d3ef901"
 					}
-					data = map[string]any{"vmgenid": generation, "description": proxmoxDescription(server.Labels)}
+					labels := make(map[string]string, len(server.Labels))
+					for k, v := range server.Labels {
+						labels[k] = v
+					}
+					if problem == "changed hostname" {
+						labels["tailscale_hostname"] = "changed-worker"
+					}
+					if problem == "changed tags" {
+						labels["tailscale_tags"] = "tag:other"
+					}
+					data = map[string]any{"vmgenid": generation, "description": proxmoxDescription(labels)}
 				case strings.HasSuffix(path, "/agent/exec"):
 					execs++
 					if err := r.ParseForm(); err != nil {
@@ -256,7 +266,7 @@ func TestProxmoxTailnetNativeEnrollmentAndFailClosedRouting(t *testing.T) {
 			} else if strings.Contains(err.Error(), tailnetTestKey) {
 				t.Fatal("credential leaked in error")
 			}
-			if (problem == "denied" || problem == "generation") && issued != 0 {
+			if (problem == "denied" || problem == "generation" || problem == "changed hostname" || problem == "changed tags") && (issued != 0 || execs != 0) {
 				t.Fatal("issued key before capability/identity validation")
 			}
 			if problem == "cancel" && !errors.Is(err, context.Canceled) {
@@ -361,7 +371,7 @@ func TestProxmoxTailnetSuppressesRedirectAndTransportErrors(t *testing.T) {
 }
 
 func TestProxmoxTailnetCloneEnrollBootstrapNativeFlow(t *testing.T) {
-	for _, problem := range []string{"", "generation after join", "missing interface", "SSH bootstrap"} {
+	for _, problem := range []string{"", "generation after join", "missing interface", "SSH bootstrap", "hostname after bind", "tags after bind"} {
 		t.Run(problem, func(t *testing.T) {
 			cfg := tailnetTestConfig()
 			cfg.Proxmox.TokenID, cfg.Proxmox.TokenSecret = "runner@pve!worker", "fixture-provider-token"
@@ -373,7 +383,7 @@ func TestProxmoxTailnetCloneEnrollBootstrapNativeFlow(t *testing.T) {
 				proxmoxRunTailnetBroker, proxmoxRunSSHQuietWithOptions, proxmoxRunSSHInput = previousBroker, previousProbe, previousInput
 			})
 			proxmoxRunTailnetBroker = func(_ context.Context, _ string, request proxmoxTailnetBrokerRequest) (proxmoxTailnetCredential, error) {
-				if !bound || request.Generation != tailnetTestGeneration {
+				if !bound || request.Generation != tailnetTestGeneration || request.Hostname != RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, "cbx_123456abcdef", "native", "proxmox") || strings.Join(request.Tags, ",") != "tag:worker" {
 					t.Error("issuer preceded durable generation binding")
 				}
 				events = append(events, "issue")
@@ -424,6 +434,15 @@ func TestProxmoxTailnetCloneEnrollBootstrapNativeFlow(t *testing.T) {
 				case strings.HasSuffix(path, "/status/start"):
 					events = append(events, "start")
 					data = "UPID:pve1:start"
+					if problem == "hostname after bind" || problem == "tags after bind" {
+						labels := proxmoxDescriptionLabels(description)
+						if problem == "hostname after bind" {
+							labels["tailscale_hostname"] = "changed-worker"
+						} else {
+							labels["tailscale_tags"] = "tag:other"
+						}
+						description = proxmoxDescription(labels)
+					}
 				case strings.HasSuffix(path, "/status/current"):
 					data = map[string]any{"vmid": 417, "name": "crabbox-test", "status": "running"}
 				case strings.HasSuffix(path, "/config"):
@@ -488,6 +507,13 @@ func TestProxmoxTailnetCloneEnrollBootstrapNativeFlow(t *testing.T) {
 				}
 			} else if err == nil {
 				t.Fatal("unsafe provisioning admitted")
+			}
+			if problem == "hostname after bind" || problem == "tags after bind" {
+				for _, event := range events {
+					if event == "issue" || event == "enroll" {
+						t.Fatal("mutable policy reached issuer or helper")
+					}
+				}
 			}
 			if (problem == "generation after join" || problem == "missing interface") && bootstrap != "" {
 				t.Fatal("SSH ran without current stable tailnet identity")

@@ -138,7 +138,9 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		return result, nil
 	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
 		if err := core.ValidateProxmoxTailnetIdentity(cfg, leaseID, claim.Slug); err != nil {
-			return core.FixedAttemptPlan{}, err
+			// No native attempt exists yet. Let the engine retire only this
+			// provably unsubmitted claim and its key under the existing fence.
+			return core.FixedAttemptPlan{}, &core.FixedCreateRejected{Err: err}
 		}
 		vmid, err := reserveFixedProxmoxVMID(ctx, client, claim)
 		if err != nil {

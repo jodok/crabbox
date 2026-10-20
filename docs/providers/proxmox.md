@@ -811,11 +811,17 @@ alphanumeric name with optional hyphens, at most 63 name characters) and the
 **final rendered** hostname (1–63 lowercase alphanumeric/hyphen characters,
 starting with an alphanumeric character). Templates are not truncated to fit;
 choose a shorter template or slug if rendering exceeds the helper's limit.
+A fresh pre-submission validation rejection retires its unsubmitted claim and
+lease key under the fixed transaction fence, allowing a corrected request to use
+the same canonical ID; it cannot retire an earlier or generation-bound attempt.
 The clone attempt also persists the trusted absolute broker path locally, not
 in the VM description. After binding VMID and vmgenid, it checks isolated exec permission and QGA readiness, rechecks the VM
-generation, acquires one key and invokes only the prepared helper through native
+generation and exact claim-bound hostname/tags, acquires one key and invokes only
+the prepared helper through native
 `agent/exec` input-data. Native REST input-data is raw stdin; PVE performs QGA's
-base64 encoding. Helper output and error bodies are never exposed as diagnostics.
+base64 encoding. Acquire requests use the original claim-checked clone policy,
+not later mutable descriptions; hostname/tag drift fails before key issuance.
+Helper output and error bodies are never exposed as diagnostics.
 
 After successful helper exit, live QGA discovery selects only an IPv4 on exact
 `tailscale0` within `100.64.0.0/10`, deterministically if several are reported.
