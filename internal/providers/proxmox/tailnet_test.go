@@ -343,3 +343,68 @@ func TestProxmoxTailnetWarmupFreshProcessInspectReplay(t *testing.T) {
 		t.Fatalf("LAN fallback: %s", calls)
 	}
 }
+
+// Keep native fixed-claim validation wired to the actual common warmup caller.
+// The provider's acquisition receipt is valid; the subsequent common SSH read
+// must not downgrade an identity rejection to a warning and report ready.
+func TestProxmoxTailnetWarmupPropagatesRequiredReceiptFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX SSH fixture")
+	}
+	_, client, _ := tailnetFixedFixture(t)
+	waitForSSHReadyFunc = func(_ context.Context, target *core.SSHTarget, _ io.Writer, _ string, _ time.Duration) error {
+		target.SSHConfigProxy = true
+		return nil
+	}
+	setControllerTestEnv(t, controllerTestConfig())
+	t.Setenv("CRABBOX_PROXMOX_TAILSCALE_BROKER", filepath.Join(t.TempDir(), "must-not-issue"))
+	dir := t.TempDir()
+	receipt := filepath.Join(dir, "receipt")
+	script := "#!/bin/sh\ncase \"$*\" in\n*'for field in ipv4 hostname'*) cat '" + receipt + "'; exit $?;;\nesac\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "ssh"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	writeReceipt := func(ip, device string) {
+		t.Helper()
+		data := strings.Join([]string{ip, "cbx-fixture", "", "", "", "", device, ""}, "\x00")
+		if err := os.WriteFile(receipt, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeReceipt("100.100.1.2", "nFixtureDevice")
+	if out, err := runControllerTestCommand(t, tailnetWarmupArgs...); err != nil {
+		t.Fatalf("initial warmup: %v %s", err, out)
+	}
+	for _, failure := range []string{"changed device", "missing device", "wrong address", "malformed", "unreadable"} {
+		t.Run(failure, func(t *testing.T) {
+			switch failure {
+			case "changed device":
+				writeReceipt("100.100.1.2", "nReplacement")
+			case "missing device":
+				writeReceipt("100.100.1.2", "")
+			case "wrong address":
+				writeReceipt("100.100.1.3", "nFixtureDevice")
+			case "malformed":
+				if err := os.WriteFile(receipt, []byte("bad framing"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable":
+				if err := os.Remove(receipt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := runControllerTestCommand(t, tailnetWarmupArgs...)
+			if err == nil || !strings.Contains(err.Error(), "required tailscale receipt") || strings.Contains(out, "ready ssh=") {
+				t.Fatalf("common native warmup failed open: %v %s", err, out)
+			}
+			claim := readFixedProxmoxClaim(t, tailnetWarmupLease)
+			if claim.Labels["tailscale_device_id"] != "nFixtureDevice" || claim.CloudImmutableID != fixedTestGeneration || claim.FixedCreateIntent.State != "acquired" {
+				t.Fatalf("receipt failure changed owned binding: %+v", claim)
+			}
+			if client.fixedCreates != 1 || client.nextCalls != 1 {
+				t.Fatal("receipt failure allocated or reissued")
+			}
+		})
+	}
+}

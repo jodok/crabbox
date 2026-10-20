@@ -357,14 +357,27 @@ func applyTailscaleMetadataToServer(server *Server, meta TailscaleMetadata) {
 	}
 }
 
-func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend Backend, coord *CoordinatorClient, useCoordinator bool, server *Server, target SSHTarget, leaseID string) {
-	if server == nil || !serverTailscaleMetadata(*server).Enabled {
-		return
+func tailscaleMetadataRequired(backend Backend, lease LeaseTarget) bool {
+	required, ok := backend.(RequiredTailscaleMetadataBackend)
+	return ok && required.TailscaleMetadataRequired(lease)
+}
+
+func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend Backend, coord *CoordinatorClient, useCoordinator bool, server *Server, target SSHTarget, leaseID string) error {
+	if server == nil {
+		return nil
+	}
+	lease := LeaseTarget{Server: *server, SSH: target, LeaseID: leaseID}
+	required := tailscaleMetadataRequired(backend, lease)
+	if !required && !serverTailscaleMetadata(*server).Enabled {
+		return nil
 	}
 	original := *server
 	original.Labels = cloneStringMap(server.Labels)
 	meta, err := readRemoteTailscaleMetadata(ctx, target)
 	if err != nil {
+		if required {
+			return fmt.Errorf("required tailscale receipt unavailable for %s: %w", leaseID, err)
+		}
 		meta = serverTailscaleMetadata(*server)
 		meta.State = "failed"
 		meta.Error = err.Error()
@@ -377,6 +390,19 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 		meta.ExitNode = firstNonEmpty(meta.ExitNode, existing.ExitNode)
 		meta.ExitNodeAllowLANAccess = meta.ExitNodeAllowLANAccess || existing.ExitNodeAllowLANAccess
 	}
+	// Required receipts must be validated by the provider against its protected
+	// identity binding before any metadata is published to the common caller.
+	if required {
+		if useCoordinator || leaseID == "" {
+			return fmt.Errorf("required tailscale receipt cannot be validated for %s", leaseID)
+		}
+		updated, err := backend.(RequiredTailscaleMetadataBackend).UpdateTailscaleMetadata(ctx, lease, meta)
+		if err != nil {
+			return fmt.Errorf("required tailscale receipt validation failed for %s: %w", leaseID, err)
+		}
+		*server = updated
+		return nil
+	}
 	applyTailscaleMetadataToServer(server, meta)
 	if useCoordinator && coord != nil && leaseID != "" {
 		if lease, err := coord.UpdateLeaseTailscaleForProvider(ctx, leaseID, cfg.Provider, meta); err == nil {
@@ -384,7 +410,7 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 			if identityErr != nil {
 				*server = original
 				fmt.Fprintf(a.Stderr, "warning: tailscale metadata update returned mismatched provider for %s: %v\n", leaseID, identityErr)
-				return
+				return nil
 			}
 			*server = updated
 		} else {
@@ -400,6 +426,7 @@ func (a App) refreshTailscaleMetadata(ctx context.Context, cfg Config, backend B
 			fmt.Fprintf(a.Stderr, "warning: tailscale metadata update failed for %s: %v\n", leaseID, err)
 		}
 	}
+	return nil
 }
 
 func coordinatorTailscaleResponseServer(cfg Config, previous Server, lease CoordinatorLease) (Server, error) {

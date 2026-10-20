@@ -28,6 +28,11 @@ func validateTailnetMetadata(server core.Server, meta core.TailscaleMetadata, ex
 	return nil
 }
 
+func (b *leaseBackend) TailscaleMetadataRequired(lease core.LeaseTarget) bool {
+	return b.Cfg.Tailscale.Enabled || lease.Server.Labels["tailscale"] == "true" ||
+		lease.SSH.AuthoritativeNetwork && lease.SSH.NetworkKind == core.NetworkTailscale
+}
+
 // UpdateTailscaleMetadata never accepts routing or device ownership from mutable
 // descriptions. The first receipt was bound inside PrepareAccess; refresh may
 // only confirm it against the same canonical lease and live VM generation.
@@ -75,4 +80,4 @@ func (b *leaseBackend) UpdateTailscaleMetadata(ctx context.Context, lease core.L
 	return live, nil
 }
 
-var _ core.TailscaleMetadataBackend = (*leaseBackend)(nil)
+var _ core.RequiredTailscaleMetadataBackend = (*leaseBackend)(nil)

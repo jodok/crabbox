@@ -828,7 +828,12 @@ Proxmox descriptions. Fixed replay revalidates the receipt against the bound
 device without another clone or key issuance. A missing receipt, changed device
 or generation fails closed; a claim without a bound device cannot adopt a mutable
 label as proof. Metadata refresh implements the common persistence capability
-and may confirm, but not replace, this identity.
+and may confirm, but not replace, this identity. For native Tailnet leases the
+receipt is a required access gate: common warmup, workspace-owner setup, sync and
+command callers propagate receipt read, validation and persistence failures before
+sending user commands or sync payloads. They do not restore cached metadata and
+continue, reallocate a VM or request another enrollment key. Other providers keep
+their existing optional, best-effort metadata refresh behavior.
 
 A public-network override cannot downgrade an already Tailnet-bound lease.
 Release does not require guest reachability. Failed/cancelled provisioning retains
