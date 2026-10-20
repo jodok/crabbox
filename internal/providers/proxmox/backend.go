@@ -369,7 +369,19 @@ func (b *leaseBackend) List(ctx context.Context, req core.ListRequest) ([]core.L
 	}
 	for i := range servers {
 		if err := b.validateTailnetBinding(&servers[i]); err != nil {
-			return nil, err
+			// Inventory is diagnostic, not access authorization. Retained failed
+			// attempts must remain visible without hiding other healthy leases or
+			// presenting mutable receipt/routing labels as verified metadata.
+			servers[i].Labels = shared.CloneLabels(servers[i].Labels)
+			for key := range servers[i].Labels {
+				if strings.HasPrefix(key, "tailscale_") {
+					delete(servers[i].Labels, key)
+				}
+			}
+			servers[i].Labels["tailscale"] = "true"
+			servers[i].Labels["tailscale_state"] = "unverified"
+			servers[i].Labels["tailscale_error"] = err.Error()
+			servers[i].PublicNet.IPv4.IP = ""
 		}
 	}
 	return servers, nil

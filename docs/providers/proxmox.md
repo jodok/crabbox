@@ -835,6 +835,11 @@ sending user commands or sync payloads. They do not restore cached metadata and
 continue, reallocate a VM or request another enrollment key. Other providers keep
 their existing optional, best-effort metadata refresh behavior.
 
+Inventory listing remains diagnostic: an incomplete or unverifiable Tailnet lease
+stays visible with `tailscale_state=unverified`, no reported device ID or access
+address, and an error for recovery; it does not hide healthy leases. This does not
+authorize resolve, replay, sync or command access.
+
 A public-network override cannot downgrade an already Tailnet-bound lease.
 Release does not require guest reachability. Failed/cancelled provisioning retains
 its fixed claim; stop the same canonical lease, not another allocation. VM

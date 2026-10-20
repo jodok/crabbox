@@ -408,3 +408,44 @@ func TestProxmoxTailnetWarmupPropagatesRequiredReceiptFailure(t *testing.T) {
 		})
 	}
 }
+
+// A retained, generation-bound attempt may not yet have a device receipt. It
+// stays visible for recovery alongside healthy leases, but never gains access.
+func TestProxmoxTailnetListRetainsIncompleteAttemptsWithoutGrantingAccess(t *testing.T) {
+	backend, client, req := tailnetFixedFixture(t)
+	healthy, err := backend.Acquire(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthyServer := client.servers[0]
+	client.cancelAfterBind = true
+	client.nextVMID = 418
+	req.RequestedLeaseID, req.RequestedSlug = "cbx_abcdef123456", "incomplete-proxmox"
+	if _, err := backend.Acquire(t.Context(), req); !errors.Is(err, context.Canceled) {
+		t.Fatalf("acquire: %v", err)
+	}
+	incomplete := client.servers[0]
+	incomplete.Labels = maps.Clone(incomplete.Labels)
+	incomplete.Labels["tailscale_device_id"] = "forged-description-device"
+	incomplete.Labels["tailscale_fqdn"] = "forged.example.test"
+	client.servers = []core.Server{incomplete, healthyServer}
+	servers, err := backend.List(t.Context(), core.ListRequest{All: true})
+	if err != nil || len(servers) != 2 {
+		t.Fatalf("inventory hidden: %v %+v", err, servers)
+	}
+	if servers[0].Labels["tailscale_state"] != "unverified" || servers[0].Labels["tailscale_error"] == "" || servers[0].Labels["tailscale_device_id"] != "" || servers[0].Labels["tailscale_fqdn"] != "" || servers[0].PublicNet.IPv4.IP != "" {
+		t.Fatalf("incomplete receipt presented as verified: %+v", servers[0])
+	}
+	if servers[1].Labels["tailscale_device_id"] != "nFixtureDevice" || servers[1].PublicNet.IPv4.IP != healthy.SSH.Host {
+		t.Fatalf("healthy lease changed: %+v", servers[1])
+	}
+	if _, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: req.RequestedLeaseID}); err == nil {
+		t.Fatal("diagnostic visibility authorized access")
+	}
+	if _, err := backend.Resolve(t.Context(), core.ResolveRequest{ID: healthy.LeaseID}); err != nil {
+		t.Fatalf("healthy resolve: %v", err)
+	}
+	if client.fixedCreates != 2 || client.nextCalls != 2 {
+		t.Fatal("inventory allocated or reissued")
+	}
+}
