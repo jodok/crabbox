@@ -65,7 +65,7 @@ func (b *leaseBackend) UpdateTailscaleMetadata(ctx context.Context, lease core.L
 	if err := validateFixedProxmoxServer(live, claim, vmid, node); err != nil {
 		return core.Server{}, err
 	}
-	if err := core.ValidateProxmoxTailnetAccess(b.Cfg, live); err != nil {
+	if err := ValidateProxmoxTailnetAccess(b.Cfg, live); err != nil {
 		return core.Server{}, err
 	}
 	if err := validateTailnetMetadata(live, meta, claim.Labels["tailscale_device_id"]); err != nil {

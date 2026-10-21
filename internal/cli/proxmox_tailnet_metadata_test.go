@@ -106,9 +106,6 @@ func TestProxmoxTailnetAuthoritativeRouteIgnoresMetadataDrift(t *testing.T) {
 	for _, fqdn := range []string{"10.77.1.32", "stale.example.test", "100.70.0.9"} {
 		server.Labels["tailscale_fqdn"] = fqdn
 		server.Labels["tailscale_hostname"] = "10.77.1.33"
-		if err := ValidateProxmoxTailnetAccess(cfg, server); err != nil {
-			t.Fatal(err)
-		}
 		target := SSHTarget{Host: "100.100.1.2", Port: "22", AuthoritativeNetwork: true, NetworkKind: NetworkTailscale, SSHConfigProxy: true}
 		bootstrap := bootstrapNetworkTarget(cfg, server, target)
 		if bootstrap.Host != target.Host {

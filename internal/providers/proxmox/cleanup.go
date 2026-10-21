@@ -99,7 +99,7 @@ func (Provider) PrepareLeaseClaimEndpoint(existing core.LeaseClaim, provider, sl
 		}
 		delete(labels, "tailscale_fqdn")
 		server.Labels = labels
-		if err := core.ValidateProxmoxTailnetAccess(core.Config{}, server); err != nil {
+		if err := ValidateProxmoxTailnetAccess(core.Config{}, server); err != nil {
 			return core.Server{}, err
 		}
 	}

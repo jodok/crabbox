@@ -30,6 +30,11 @@ type ProxmoxClient struct {
 	// GuestBootstrap extends the base SSH bootstrap with provider-owned setup
 	// and readiness checks for an explicitly selected prepared template.
 	GuestBootstrap func(Config) (setup, readyChecks string)
+	// GuestAdmission validates provider policy and supplies immutable clone labels
+	// before any native mutation. GuestEnrollment runs after generation binding
+	// and start, before address readiness or SSH bootstrap.
+	GuestAdmission  func(Config, string, string, map[string]string) (map[string]string, error)
+	GuestEnrollment func(context.Context, Config, Server) error
 }
 
 type ProxmoxReadinessCheck struct {
@@ -1107,18 +1112,18 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 	if vmid <= 0 {
 		return Server{}, Exit(2, "proxmox VMID must be positive")
 	}
-	if cfg.Tailscale.Enabled {
-		if err := ValidateProxmoxTailnetConfig(cfg); err != nil {
-			return Server{}, err
-		}
-		if extraLabels["fixed_intent_sha256"] == "" {
-			return Server{}, Exit(2, "Proxmox Tailnet provisioning requires a fixed lease")
-		}
-		if err := ValidateProxmoxTailnetIdentity(cfg, leaseID, slug); err != nil {
-			return Server{}, err
-		}
-		cfg.Tailscale.Hostname = RenderTailscaleHostname(cfg.Tailscale.HostnameTemplate, leaseID, slug, "proxmox")
+	var guestLabels map[string]string
+	if cfg.Tailscale.Enabled && (c.GuestAdmission == nil || c.GuestEnrollment == nil) {
+		return Server{}, Exit(2, "private guest provisioning requires provider-owned admission and enrollment")
 	}
+	if c.GuestAdmission != nil {
+		var err error
+		guestLabels, err = c.GuestAdmission(cfg, leaseID, slug, extraLabels)
+		if err != nil {
+			return Server{}, err
+		}
+	}
+
 	name := LeaseProviderName(leaseID, slug)
 	full := "1"
 	if !cfg.Proxmox.FullClone {
@@ -1136,7 +1141,7 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		clone.Set("pool", cfg.Proxmox.Pool)
 	}
 	labels := DirectLeaseLabels(cfg, leaseID, slug, "proxmox", "", keep, time.Now().UTC())
-	for key, value := range ProxmoxTailnetIdentityLabels(cfg, leaseID, slug) {
+	for key, value := range guestLabels {
 		labels[key] = value
 	}
 	for key, value := range extraLabels {
@@ -1170,7 +1175,7 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 	}
 
 	var boundGeneration string
-	var boundTailnetServer Server
+	var boundServer Server
 	if fixed {
 		server, err := c.getServer(ctx, clonedVMID, true)
 		if err != nil {
@@ -1182,8 +1187,8 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		}
 		// Preserve policy from the claim-checked clone inputs, not a later
 		// mutable description read. Bind has verified the live generation.
-		boundTailnetServer = server
-		boundTailnetServer.Labels = maps.Clone(labels)
+		boundServer = server
+		boundServer.Labels = maps.Clone(labels)
 	}
 	description := proxmoxDescription(labels)
 	config := url.Values{
@@ -1206,17 +1211,11 @@ func (c *ProxmoxClient) CreateServerWithVMID(ctx context.Context, cfg Config, pu
 		return Server{}, err
 	}
 	if cfg.Tailscale.Enabled {
-		server, err := c.getServer(ctx, clonedVMID, true)
-		if err != nil {
-			return Server{}, err
-		}
-		if err := validateProxmoxTailnetEnrollmentBinding(server, boundTailnetServer); err != nil {
-			return Server{}, err
-		}
-		if err := c.provisionTailnet(ctx, cfg, boundTailnetServer); err != nil {
+		if err := c.GuestEnrollment(ctx, cfg, boundServer); err != nil {
 			return Server{}, err
 		}
 	}
+
 	server, err := c.waitServerIP(ctx, vmid)
 	if err != nil {
 		cleanupClone()
@@ -1464,7 +1463,7 @@ func (c *ProxmoxClient) getServer(ctx context.Context, id string, requireConfig 
 	}
 	server := proxmoxVMToServer(c.Node, status, labels, ip)
 	if generation, ok := config["vmgenid"].(string); ok {
-		server.ImmutableID = proxmoxGenerationID(generation)
+		server.ImmutableID = ProxmoxGenerationID(generation)
 	}
 	if server.Name == "" {
 		server.Name = "vm-" + strconv.Itoa(vmid)
@@ -1472,7 +1471,8 @@ func (c *ProxmoxClient) getServer(ctx context.Context, id string, requireConfig 
 	return server, nil
 }
 
-func proxmoxGenerationID(value string) string {
+// ProxmoxGenerationID decodes the native immutable VM generation identifier.
+func ProxmoxGenerationID(value string) string {
 	if len(value) != 36 {
 		return ""
 	}
@@ -1762,4 +1762,15 @@ systemctl restart ssh || systemctl restart ssh.socket || true
 touch /var/lib/crabbox/bootstrapped
 /usr/local/bin/crabbox-ready
 `, shellQuote(cfg.WorkRoot), shellQuote(cfg.SSHUser), setup, checks)
+}
+
+// RequestRequired exposes authenticated envelope transport to provider-owned
+// reconciliation. Callers own policy, redaction and redirect handling.
+func (c *ProxmoxClient) RequestRequired(ctx context.Context, method, path string, form url.Values, out any) error {
+	return c.doRequired(ctx, method, path, form, out)
+}
+
+// GuestIPv4 reads native interface readiness without supplying provider policy.
+func (c *ProxmoxClient) GuestIPv4(ctx context.Context, vmid int, tailnet bool) (string, error) {
+	return c.guestIPv4ForNetwork(ctx, vmid, tailnet)
 }

@@ -553,3 +553,6 @@ fi
 test -s /tmp/crabbox-exit-node-ip
 `
 }
+
+// ValidateNetworkConfig validates shared transport settings for provider adapters.
+func ValidateNetworkConfig(cfg Config) error { return validateNetworkConfig(cfg) }

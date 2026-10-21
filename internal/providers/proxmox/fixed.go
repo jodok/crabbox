@@ -137,7 +137,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		}
 		return result, nil
 	}, Plan: func(ctx context.Context, claim core.LeaseClaim) (core.FixedAttemptPlan, error) {
-		if err := core.ValidateProxmoxTailnetIdentity(cfg, leaseID, claim.Slug); err != nil {
+		if err := ValidateProxmoxTailnetIdentity(cfg, leaseID, claim.Slug); err != nil {
 			// No native attempt exists yet. Let the engine retire only this
 			// provably unsubmitted claim and its key under the existing fence.
 			return core.FixedAttemptPlan{}, &core.FixedCreateRejected{Err: err}
@@ -195,7 +195,7 @@ func (b *leaseBackend) acquireFixed(ctx context.Context, req core.AcquireRequest
 		if err := validateFixedProxmoxServer(server, *claim, attemptVMID, attemptNode); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		if err := core.ValidateProxmoxTailnetAccess(cfg, server); err != nil {
+		if err := ValidateProxmoxTailnetAccess(cfg, server); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		target := proxmoxNetworkTarget(cfg, server)
@@ -313,7 +313,7 @@ func fixedProxmoxIdentityLabels(cfg core.Config, leaseID, slug, fingerprint, nod
 			labels[key] = value
 		}
 	}
-	for key, value := range core.ProxmoxTailnetIdentityLabels(cfg, leaseID, slug) {
+	for key, value := range ProxmoxTailnetIdentityLabels(cfg, leaseID, slug) {
 		labels[key] = value
 	}
 	return labels
@@ -443,7 +443,7 @@ func (b *leaseBackend) releaseFixed(ctx context.Context, req core.ReleaseLeaseRe
 			return core.Exit(4, "lease_id_conflict: fixed Proxmox VMID %d or requested name still exists; claim retained", vmid)
 		}
 		if expected.Labels["tailscale"] == "true" && expected.CloudImmutableID != "" {
-			return core.ReleaseProxmoxTailnet(ctx, b.Cfg, core.Server{Provider: "proxmox", CloudID: expected.CloudID, HostID: expected.Labels["node"], ImmutableID: expected.CloudImmutableID, Labels: expected.Labels})
+			return ReleaseProxmoxTailnet(ctx, b.Cfg, core.Server{Provider: "proxmox", CloudID: expected.CloudID, HostID: expected.Labels["node"], ImmutableID: expected.CloudImmutableID, Labels: expected.Labels})
 		}
 		return nil
 	}

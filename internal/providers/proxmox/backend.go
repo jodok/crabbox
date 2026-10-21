@@ -61,7 +61,7 @@ func (b *leaseBackend) SupportsRequestedLeaseID() bool { return true }
 
 func (b *leaseBackend) Acquire(ctx context.Context, req core.AcquireRequest) (core.LeaseTarget, error) {
 	if b.Cfg.Tailscale.Enabled {
-		if err := core.ValidateProxmoxTailnetConfig(b.Cfg); err != nil {
+		if err := ValidateProxmoxTailnetConfig(b.Cfg); err != nil {
 			return core.LeaseTarget{}, err
 		}
 		if !core.IsCanonicalLeaseID(req.RequestedLeaseID) {
@@ -339,7 +339,7 @@ func (b *leaseBackend) targetForServer(server core.Server, releaseOnly bool) (co
 		if err := b.validateTailnetBinding(&server); err != nil {
 			return core.LeaseTarget{}, err
 		}
-		if err := core.ValidateProxmoxTailnetAccess(cfg, server); err != nil {
+		if err := ValidateProxmoxTailnetAccess(cfg, server); err != nil {
 			return core.LeaseTarget{}, err
 		}
 	}
@@ -777,6 +777,7 @@ var newClient = func(cfg core.Config) (proxmoxClient, error) {
 	client, err := core.NewProxmoxClient(cfg)
 	if err == nil {
 		client.GuestBootstrap = preparedTemplateBootstrap
+		configureTailnetClient(client)
 	}
 	return client, err
 }
